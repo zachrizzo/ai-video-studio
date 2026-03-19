@@ -1,0 +1,43 @@
+[project]
+name = "paper-to-video"
+version = "0.1.0"
+description = "Generate 3Blue1Brown-style educational videos from research papers"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    # PDF Parsing
+    "pymupdf>=1.24.0",
+    "pdfplumber>=0.11.0",
+    # Animation
+    "manim>=0.18.0",
+    # Voice Synthesis
+    "elevenlabs>=1.15.0",
+    # Audio/Video Processing
+    "pydub>=0.25.1",
+    "ffmpeg-python>=0.2.0",
+    # Browser Rendering
+    "playwright>=1.40.0",
+    # Utilities
+    "pydantic>=2.5.0",
+    "pydantic-settings>=2.1.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0.0",
+    "pytest-asyncio>=0.23.0",
+    "ruff>=0.4.0",
+]
+voice-record = [
+    "sounddevice>=0.4.6",
+    "soundfile>=0.12.0",
+]
+
+[project.scripts]
+paper-to-video = "src.pipeline:main"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"

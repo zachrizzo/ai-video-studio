@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        width: 1920px;
+        height: 1080px;
+        background: #1a1a2e;
+        font-family: 'Helvetica Neue', 'Inter', sans-serif;
+        overflow: hidden;
+        color: white;
+    }
+    .title {
+        position: absolute;
+        top: 40px;
+        left: 0;
+        width: 100%;
+        text-align: center;
+        font-size: 42px;
+        font-weight: 700;
+        opacity: 0;
+        animation: fadeIn 1s ease forwards;
+    }
+    .diagram {
+        position: absolute;
+        top: 140px;
+        left: 50%;
+        transform: translateX(-50%);
+        display: flex;
+        align-items: center;
+        gap: 60px;
+    }
+    .box {
+        width: 240px;
+        height: 120px;
+        border: 2px solid #58C4DD;
+        border-radius: 12px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-size: 24px;
+        font-weight: 600;
+        opacity: 0;
+        background: rgba(88, 196, 221, 0.1);
+    }
+    .arrow {
+        width: 60px;
+        height: 2px;
+        background: #58C4DD;
+        position: relative;
+        opacity: 0;
+    }
+    .arrow::after {
+        content: '';
+        position: absolute;
+        right: -2px;
+        top: -6px;
+        border: 6px solid transparent;
+        border-left: 10px solid #58C4DD;
+    }
+    /* Staggered animations */
+    .box:nth-child(1) { animation: fadeSlideRight 0.8s ease 0.5s forwards; }
+    .arrow:nth-child(2) { animation: fadeIn 0.5s ease 1.3s forwards; }
+    .box:nth-child(3) { animation: fadeSlideRight 0.8s ease 1.8s forwards; }
+    .arrow:nth-child(4) { animation: fadeIn 0.5s ease 2.6s forwards; }
+    .box:nth-child(5) { animation: fadeSlideRight 0.8s ease 3.1s forwards; }
+
+    @keyframes fadeIn {
+        to { opacity: 1; }
+    }
+    @keyframes fadeSlideRight {
+        from { opacity: 0; transform: translateX(-30px); }
+        to { opacity: 1; transform: translateX(0); }
+    }
+</style>
+</head>
+<body>
+    <div class="title">Architecture Overview</div>
+    <div class="diagram">
+        <div class="box">Input</div>
+        <div class="arrow"></div>
+        <div class="box" style="border-color: #FFFF00; background: rgba(255,255,0,0.08);">Process</div>
+        <div class="arrow"></div>
+        <div class="box" style="border-color: #83C167; background: rgba(131,193,103,0.08);">Output</div>
+    </div>
+</body>
+</html>

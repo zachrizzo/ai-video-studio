@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+        width: 1920px;
+        height: 1080px;
+        background: #1a1a2e;
+        font-family: 'Helvetica Neue', 'Inter', sans-serif;
+        overflow: hidden;
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+    }
+    .timeline-container {
+        width: 1600px;
+        position: relative;
+    }
+    .timeline-title {
+        text-align: center;
+        font-size: 42px;
+        font-weight: 700;
+        margin-bottom: 80px;
+        opacity: 0;
+        animation: fadeIn 1s ease forwards;
+    }
+    .timeline-line {
+        position: absolute;
+        top: 180px;
+        left: 100px;
+        right: 100px;
+        height: 3px;
+        background: #333;
+        transform: scaleX(0);
+        transform-origin: left;
+        animation: growLine 2s ease 0.5s forwards;
+    }
+    .timeline-point {
+        position: absolute;
+        top: 140px;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        opacity: 0;
+    }
+    .dot {
+        width: 20px;
+        height: 20px;
+        border-radius: 50%;
+        background: #58C4DD;
+        box-shadow: 0 0 20px rgba(88, 196, 221, 0.4);
+    }
+    .point-label {
+        font-size: 22px;
+        font-weight: 600;
+        text-align: center;
+        max-width: 200px;
+    }
+    .point-desc {
+        font-size: 16px;
+        color: #a0a0b8;
+        text-align: center;
+        max-width: 200px;
+    }
+    .timeline-point:nth-child(3) { left: 100px; animation: fadeIn 0.6s ease 1.5s forwards; }
+    .timeline-point:nth-child(4) { left: 450px; animation: fadeIn 0.6s ease 2.0s forwards; }
+    .timeline-point:nth-child(5) { left: 800px; animation: fadeIn 0.6s ease 2.5s forwards; }
+    .timeline-point:nth-child(6) { left: 1150px; animation: fadeIn 0.6s ease 3.0s forwards; }
+
+    @keyframes fadeIn { to { opacity: 1; } }
+    @keyframes growLine { to { transform: scaleX(1); } }
+</style>
+</head>
+<body>
+    <div class="timeline-container">
+        <div class="timeline-title">Key Milestones</div>
+        <div class="timeline-line"></div>
+        <div class="timeline-point">
+            <div class="dot"></div>
+            <div class="point-label">Step 1</div>
+            <div class="point-desc">Description here</div>
+        </div>
+        <div class="timeline-point">
+            <div class="dot" style="background: #FFFF00;"></div>
+            <div class="point-label">Step 2</div>
+            <div class="point-desc">Description here</div>
+        </div>
+        <div class="timeline-point">
+            <div class="dot" style="background: #83C167;"></div>
+            <div class="point-label">Step 3</div>
+            <div class="point-desc">Description here</div>
+        </div>
+        <div class="timeline-point">
+            <div class="dot" style="background: #FC6255;"></div>
+            <div class="point-label">Step 4</div>
+            <div class="point-desc">Description here</div>
+        </div>
+    </div>
+</body>
+</html>
