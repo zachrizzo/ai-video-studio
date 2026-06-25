@@ -4,7 +4,6 @@ Each function is a standalone step that can be called via:
     uv run python -m src.pipeline <command> [args]
 
 Commands:
-    parse <pdf_path> <output_dir>         Parse a PDF and save structured content
     synthesize <script.json> <output_dir>  Synthesize voice for all segments
     silence <script.json> <output_dir>     Generate silent audio (estimated durations)
     render <scene_spec.json> <work_dir>    Validate and render a single scene
@@ -20,30 +19,6 @@ from pathlib import Path
 from rich.console import Console
 
 console = Console()
-
-
-def cmd_parse(pdf_path: str, output_dir: str):
-    """Parse a PDF and save structured content as JSON."""
-    from .ingestion.parser import parse_paper
-
-    pdf = Path(pdf_path)
-    out = Path(output_dir)
-    out.mkdir(parents=True, exist_ok=True)
-
-    paper = parse_paper(pdf, output_dir=out / "figures")
-
-    # Save as JSON
-    paper_json = out / "paper.json"
-    paper_json.write_text(paper.model_dump_json(indent=2))
-
-    console.print(f"[green]Parsed: {paper.title}[/green]")
-    console.print(f"  Sections: {len(paper.sections)}")
-    console.print(f"  Saved to: {paper_json}")
-
-    # Also save raw markdown for Claude to read
-    markdown_path = out / "paper.md"
-    markdown_path.write_text(paper.raw_text)
-    console.print(f"  Markdown: {markdown_path}")
 
 
 def cmd_synthesize(script_json: str, output_dir: str):
@@ -65,7 +40,6 @@ def cmd_synthesize(script_json: str, output_dir: str):
         style=config.voice_style,
         model_id=config.elevenlabs_model,
         use_speaker_boost=config.voice_use_speaker_boost,
-        speed=config.voice_speed,
     )
 
     audio_segments = synth.synthesize_all(script.segments, out)
@@ -222,7 +196,6 @@ def cmd_setup(base_dir: str):
 
 
 COMMANDS = {
-    "parse": cmd_parse,
     "synthesize": cmd_synthesize,
     "silence": cmd_silence,
     "render": cmd_render,

@@ -52,7 +52,6 @@ class VoiceSynthesizer:
         style: float = 0.0,
         model_id: str = "eleven_v3",
         use_speaker_boost: bool = True,
-        speed: float = 1.1,
     ):
         from elevenlabs.client import ElevenLabs
         self.client = ElevenLabs(api_key=api_key)
@@ -62,7 +61,6 @@ class VoiceSynthesizer:
         self.style = style
         self.model_id = model_id
         self.use_speaker_boost = use_speaker_boost
-        self.speed = max(0.7, min(1.2, speed))  # clamp to API limits
 
     def _clean_text(self, text: str) -> str:
         """Clean narration text. Preserves v3 audio tags, strips stage directions."""
@@ -135,9 +133,6 @@ class VoiceSynthesizer:
                 "use_speaker_boost": self.use_speaker_boost,
             },
         )
-        if self.speed != 1.0:
-            convert_kwargs["speed"] = self.speed
-
         audio_generator = self.client.text_to_speech.convert(**convert_kwargs)
 
         with open(audio_path, "wb") as f:
