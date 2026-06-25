@@ -21,6 +21,24 @@ class PipelineConfig(BaseSettings):
     frame_rate: int = 30
     background_color: str = "#1a1a2e"
 
+    # Local image generation (FLUX via mflux)
+    # image_model: any mflux base model. FLUX ("schnell"/"dev") is gated on HF and
+    # needs a one-time `hf auth login` + license acceptance. Ungated alternatives
+    # that work with no login: "z-image-turbo", "z-image", "qwen", "flux2-klein-4b".
+    image_provider: Literal["mflux", "none"] = "mflux"
+    image_model: str = "schnell"
+    image_steps: int = 4  # schnell/turbo ~4-8; dev ~20-25
+    image_quantize: int = 4  # mflux -q (4 or 8); 4 = lowest memory
+    image_force: bool = False  # regenerate even if a PNG already exists
+    image_timeout_seconds: int = 900  # first run downloads a multi-GB model
+
+    # Local video / motion generation
+    video_provider: Literal["kenburns", "comfyui"] = "kenburns"
+    kenburns_zoom: float = 1.12
+    comfyui_url: str = "http://127.0.0.1:8188"
+    comfyui_model: str = "ltx"
+    video_fallback_to_kenburns: bool = True  # if comfyui fails, fall back to kenburns
+
     # Pipeline Settings
     max_render_attempts: int = 5
     render_timeout_seconds: int = 120

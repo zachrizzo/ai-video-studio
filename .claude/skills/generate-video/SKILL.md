@@ -138,6 +138,32 @@ Each animation_cue corresponds to a **specific word or phrase in the narration**
 - For Manim segments, timestamp_hints map directly to `self.wait()` durations between animations
 - For HTML segments, timestamp_hints become `animation-delay` CSS values
 
+### Visual Type — Classify Each Segment: `scene` vs `diagram`
+
+Every segment gets a `visual_type`. This decides whether it's a real animated diagram
+or a generated photographic scene:
+
+- **`diagram`** (default) — maps, timelines, stat reveals, comparisons, equations,
+  flowcharts. These keep the HTML/Manim animation path (Steps 6–7). This is the moat:
+  word-synced animated visuals farms can't make. Most explainer segments are diagrams.
+- **`scene`** — cinematic/photographic moments: a place, person, army, landscape, or
+  event. These get a generated FLUX still that becomes a motion clip. A `scene`
+  segment MUST include an `image_prompt`.
+
+For `scene` segments, write a vivid `image_prompt`: subject + setting + era + lighting
++ composition + "photorealistic, cinematic, wide shot". Keep prompts free of any text,
+words, logos, or UI (image models render text poorly). Example:
+`"Mongol horse archers galloping across a snowy steppe at dawn, fur armor, recurved bows, dramatic low sunlight, photorealistic, cinematic wide shot, 13th century"`.
+
+Add the fields to each segment in script.json:
+```json
+{ "segment_id": "seg_002", "...": "...", "visual_engine": "html",
+  "visual_type": "scene",
+  "image_prompt": "Mongol horse archers galloping across a snowy steppe at dawn, ..." }
+```
+A good explainer mixes both: diagrams for the data/structure, scenes for the
+emotional/cinematic beats. Diagram segments omit `image_prompt` (or set it null).
+
 ## Step 5: Generate Audio
 **With voice** (ElevenLabs configured):
 ```bash
@@ -150,9 +176,34 @@ uv run python -m src.pipeline silence <run_dir>/script.json <audio_dir>
 ```
 Both produce `<audio_dir>/audio_manifest.json` with durations per segment.
 
+## Step 5b: Generate Scene Imagery & Motion Clips (for `scene` segments)
+
+Run AFTER audio (Step 5) so the audio manifest exists with real durations. These two
+commands only touch `scene`-type segments; `diagram` segments are skipped entirely and
+handled by Step 6.
+
+```bash
+# 1. FLUX stills -> <run_dir>/images/{seg}.png  (one-time model download on first run)
+uv run python -m src.pipeline imagegen <run_dir>/script.json <run_dir>
+
+# 2. Stills -> motion clips at exact audio durations -> <run_dir>/clips/{seg}.mp4
+uv run python -m src.pipeline videogen <run_dir>/script.json <run_dir>
+```
+Notes:
+- Always `uv run` (project Python 3.12, not system python).
+- FLUX (`schnell`/`dev`) is gated on HuggingFace — needs a one-time `hf auth login` +
+  license acceptance. No login? Use an ungated model: `PTV_IMAGE_MODEL=z-image-turbo`.
+- Video engine is `kenburns` (ffmpeg pan/zoom, fast) by default; set
+  `PTV_VIDEO_PROVIDER=comfyui` for true AI image-to-video (LTX) if a ComfyUI server is
+  running (auto-falls back to kenburns if not).
+- `videogen` reads `audio_manifest.json`, so scene clips are duration-locked — no manual
+  timing math needed for scene segments.
+- Regenerate a single bad scene: pass ids, e.g. `imagegen <script> <run_dir> seg_002`.
+
 ## Step 6: Generate & Render Visuals (YOU write the code)
 
-For each segment, read its actual audio duration from the manifest. Then:
+This step is for `diagram` segments only (scene segments are done in Step 5b).
+For each diagram segment, read its actual audio duration from the manifest. Then:
 
 1. **Write the visual code** using the animation_cues timestamps to synchronize visuals to narration
 2. **Save a scene spec JSON** at `<scenes_dir>/<segment_id>.json`:
@@ -225,14 +276,21 @@ Reference the prompt at `.claude/skills/generate-video/prompts/manim_codegen.md`
 Reference the prompt at `.claude/skills/generate-video/prompts/html_codegen.md`
 
 ## Step 7: Composite Final Video
-Create a composite manifest at `<run_dir>/composite_manifest.json`:
+Create a composite manifest at `<run_dir>/composite_manifest.json`. For each segment,
+in script order, pick its video by precedence:
+1. `<run_dir>/clips/{seg}.mp4`  — scene motion clip (if it exists)
+2. `<run_dir>/scenes/{seg}_render/{seg}_(html|manim).mp4` — diagram render
+3. the fallback render
+
+So scene segments use their motion clip and diagram segments use their animation.
 ```json
 {
-    "video_paths": ["path/to/seg_001.mp4", "path/to/seg_002.mp4"],
-    "audio_paths": ["path/to/audio_seg_001.mp3", "path/to/audio_seg_002.mp3"]
+    "video_paths": ["path/to/clips/seg_002.mp4", "path/to/scenes/seg_003_render/seg_003_html.mp4"],
+    "audio_paths": ["path/to/audio_seg_002.mp3", "path/to/audio_seg_003.mp3"]
 }
 ```
-For **video-only** (no audio), omit `audio_paths` or set to `[]`.
+For **video-only** (no audio), omit `audio_paths` or set to `[]`. Scene clip durations
+are already locked to audio (Step 5b), so no manual timing is needed.
 
 ```bash
 uv run python -m src.pipeline composite <run_dir>/composite_manifest.json output/<title>.mp4

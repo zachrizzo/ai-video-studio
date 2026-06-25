@@ -7,6 +7,8 @@ Commands:
     synthesize <script.json> <output_dir>  Synthesize voice for all segments
     silence <script.json> <output_dir>     Generate silent audio (estimated durations)
     render <scene_spec.json> <work_dir>    Validate and render a single scene
+    imagegen <script.json> <run_dir> [ids] Generate FLUX stills for scene segments
+    videogen <script.json> <run_dir> [ids] Turn scene stills into motion clips
     fallback <segment_id> <title> <desc> <duration> <work_dir>  Generate fallback visual
     composite <manifest.json> <output.mp4> Composite final video (audio optional)
     setup <base_dir>                       Create working directories
@@ -157,6 +159,125 @@ def cmd_fallback(segment_id: str, title: str, description: str, duration: str, w
     }))
 
 
+def cmd_imagegen(script_json: str, run_dir: str, segment_ids: str = ""):
+    """Generate FLUX still images for 'scene' segments. Writes run_dir/images/{seg}.png.
+
+    segment_ids: optional comma-separated filter; default = all scene segments.
+    Skips existing PNGs unless PTV_IMAGE_FORCE=1.
+    """
+    from .analysis.script_writer import load_script
+    from .config import PipelineConfig
+    from .imagegen.flux import generate_image
+
+    config = PipelineConfig()
+    script = load_script(Path(script_json))
+    images_dir = Path(run_dir) / "images"
+    images_dir.mkdir(parents=True, exist_ok=True)
+    w, h = config.resolution
+
+    only = {s.strip() for s in segment_ids.split(",") if s.strip()}
+    generated, skipped, failed = [], [], []
+
+    for seg in script.segments:
+        if seg.visual_type != "scene" or not seg.image_prompt:
+            continue
+        if only and seg.segment_id not in only:
+            continue
+        out = images_dir / f"{seg.segment_id}.png"
+        if out.exists() and out.stat().st_size > 0 and not config.image_force:
+            skipped.append(seg.segment_id)
+            console.print(f"[dim]Skip (exists): {seg.segment_id}[/dim]")
+            continue
+        result = generate_image(
+            prompt=seg.image_prompt, output_path=out, segment_id=seg.segment_id,
+            width=w, height=h, steps=config.image_steps, model=config.image_model,
+            quantize=config.image_quantize, timeout=config.image_timeout_seconds,
+        )
+        if result.success:
+            generated.append(seg.segment_id)
+        else:
+            failed.append({"segment_id": seg.segment_id, "error": result.error_message})
+            console.print(f"[red]Failed: {seg.segment_id}: {result.error_message}[/red]")
+
+    print(json.dumps({
+        "generated": generated, "skipped": skipped, "failed": failed,
+        "images_dir": str(images_dir),
+    }))
+
+
+def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
+    """Turn scene stills into motion clips at each segment's exact audio duration.
+
+    Reads run_dir/audio/audio_manifest.json for durations. Writes run_dir/clips/{seg}.mp4
+    using the configured provider (kenburns | comfyui). segment_ids optional filter.
+    """
+    from .analysis.script_writer import load_script
+    from .config import PipelineConfig
+    from .videogen.kenburns import kenburns_clip, DIRECTIONS
+
+    config = PipelineConfig()
+    script = load_script(Path(script_json))
+    rd = Path(run_dir)
+    images_dir = rd / "images"
+    clips_dir = rd / "clips"
+    clips_dir.mkdir(parents=True, exist_ok=True)
+
+    manifest_path = rd / "audio" / "audio_manifest.json"
+    audio_manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
+
+    only = {s.strip() for s in segment_ids.split(",") if s.strip()}
+    generated, skipped, failed = [], [], []
+
+    scene_index = 0
+    for seg in script.segments:
+        if seg.visual_type != "scene":
+            continue
+        if only and seg.segment_id not in only:
+            continue
+        img = images_dir / f"{seg.segment_id}.png"
+        if not img.exists():
+            failed.append({"segment_id": seg.segment_id, "error": "no image (run imagegen first)"})
+            continue
+
+        out = clips_dir / f"{seg.segment_id}.mp4"
+        if out.exists() and out.stat().st_size > 0 and not config.image_force:
+            skipped.append(seg.segment_id)
+            scene_index += 1
+            continue
+
+        # Duration: prefer the real audio duration; fall back to the estimate.
+        entry = audio_manifest.get(seg.segment_id)
+        duration = entry["duration_seconds"] if entry else seg.estimated_duration_seconds
+        if not entry:
+            console.print(f"[yellow]{seg.segment_id}: no audio manifest entry, using estimate {duration:.1f}s[/yellow]")
+
+        direction = DIRECTIONS[scene_index % len(DIRECTIONS)]
+        scene_index += 1
+
+        if config.video_provider == "comfyui":
+            from .videogen.comfyui import image_to_video
+            result = image_to_video(
+                img, out, duration, resolution=config.resolution, fps=config.frame_rate,
+                model=config.comfyui_model, base_url=config.comfyui_url,
+                fallback_to_kenburns=config.video_fallback_to_kenburns, direction=direction,
+            )
+        else:
+            result = kenburns_clip(
+                img, out, duration, resolution=config.resolution, fps=config.frame_rate,
+                zoom=config.kenburns_zoom, direction=direction,
+            )
+
+        if result["success"]:
+            generated.append(seg.segment_id)
+        else:
+            failed.append({"segment_id": seg.segment_id, "error": result["error_message"]})
+
+    print(json.dumps({
+        "generated": generated, "skipped": skipped, "failed": failed,
+        "clips_dir": str(clips_dir),
+    }))
+
+
 def cmd_composite(manifest_json: str, output_path: str):
     """Composite video and audio segments into a final video. Audio is optional."""
     from .compositing.compositor import VideoCompositor
@@ -199,6 +320,9 @@ COMMANDS = {
     "synthesize": cmd_synthesize,
     "silence": cmd_silence,
     "render": cmd_render,
+    "imagegen": cmd_imagegen,
+    "videogen": cmd_videogen,
+    "motionclip": cmd_videogen,
     "fallback": cmd_fallback,
     "composite": cmd_composite,
     "setup": cmd_setup,

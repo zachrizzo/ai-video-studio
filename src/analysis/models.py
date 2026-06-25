@@ -33,6 +33,11 @@ class ScriptSegment(BaseModel):
     animation_cues: list[AnimationCue]
     visual_engine: Literal["manim", "html"]
     transition_type: str = "fade"  # "fade", "slide", "none"
+    # Routing for the visual: "diagram" keeps the existing HTML/Manim animation
+    # path (maps, timelines, stat reveals); "scene" generates a FLUX still that
+    # becomes a motion clip. Defaults to "diagram" so existing scripts are unchanged.
+    visual_type: Literal["scene", "diagram"] = "diagram"
+    image_prompt: str | None = None  # FLUX prompt, required for "scene" segments
 
 
 class VideoScript(BaseModel):

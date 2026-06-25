@@ -6,6 +6,29 @@ from rich.console import Console
 console = Console()
 
 
+def resolve_segment_video(run_dir: Path, segment_id: str) -> Path | None:
+    """Return the best available video for a segment, in priority order:
+
+    1. clips/{id}.mp4          (AI/motion clip for "scene" segments)
+    2. scenes/{id}_render/{id}_(html|manim).mp4   (rendered diagram animation)
+    3. scenes/{id}_render/{id}_fallback.mp4       (fallback title card)
+    else None.
+    """
+    run_dir = Path(run_dir)
+    clip = run_dir / "clips" / f"{segment_id}.mp4"
+    if clip.exists():
+        return clip
+    render_dir = run_dir / "scenes" / f"{segment_id}_render"
+    for suffix in ("html", "manim"):
+        scene = render_dir / f"{segment_id}_{suffix}.mp4"
+        if scene.exists():
+            return scene
+    fallback = render_dir / f"{segment_id}_fallback.mp4"
+    if fallback.exists():
+        return fallback
+    return None
+
+
 class VideoCompositor:
     """Composites video segments and audio into a final YouTube-ready video."""
 
