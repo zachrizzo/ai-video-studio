@@ -130,6 +130,8 @@ the viewer works with runs that already exist (no migration). Segment status:
 5. Segment cards fill in and flip to ✅; final-video player appears when mp4 exists.
 
 ## MVP build order
+0. **Codebase cleanup** (see section below) — delete dead PDF-ingestion path,
+   `templates/`, and unused deps; verify the pipeline still runs. Isolated commit.
 1. Backend shell: FastAPI + `runs.py` manifest + `/media` static serving. Verify
    against the existing Mongol run (`/tmp/mongol-video/run_2e98e40a`).
 2. Frontend shell: React+Vite two-panel layout; FlowViewer reads a run over REST
@@ -139,6 +141,41 @@ the viewer works with runs that already exist (no migration). Segment status:
 5. Fast-follow: per-segment "regenerate" button (chat-driven command).
 6. Fast-follow: local image/video gen modules (`src/imagegen/` FLUX via ComfyUI,
    `src/videogen/` Wan/LTX) populate the image/clip columns.
+
+## Codebase cleanup (part of this work)
+
+The project pivoted from "paper PDF → video" to "topic → video." The PDF-ingestion
+path and unused scaffolding are now dead weight. Remove it as part of this effort so
+the Studio app is built on a lean pipeline. Verified unused as of 2026-06-24:
+
+**Delete (confirmed dead):**
+- `src/ingestion/` — `parser.py` (615 lines, PyMuPDF PDF parsing), `models.py`
+  (PaperContent/Section/Equation/Figure/Table), `__init__.py`. The topic-driven flow
+  never calls `parse`; Claude writes `analysis.json` + `script.json` directly.
+- `src/pipeline.py` — remove `cmd_parse`, its `"parse"` entry in the command table,
+  and its line in the usage/help text.
+- `templates/` — entire dir (`html/*.html`, `manim/*.py`, stale `__pycache__`).
+  Referenced nowhere in `src/`; visual code is authored inline by Claude.
+- `pyproject.toml` — drop `pymupdf` and `pdfplumber` deps (only used by the parser).
+
+**Audit, then delete if unused:**
+- `src/analysis/analyzer.py` and `src/analysis/script_writer.py` (21 lines each) —
+  likely vestigial; analysis + scriptwriting are done by Claude, not these modules.
+  Confirm no imports, then remove (keep `src/analysis/models.py` if the dataclasses
+  are still used by the pipeline).
+- `src/voice/synthesizer.py` — remove the now-unused `speed` constructor param /
+  attribute left over after the ElevenLabs API change.
+
+**Keep (still relevant):**
+- `scripts/clone_voice.py`, `scripts/record_voice.py` — support the own-voice path
+  (relevant given ElevenLabs paid-voice + demonetization concerns).
+- All of `src/animation/`, `src/voice/`, `src/compositing/`, `src/utils/`,
+  `src/config.py` — the live pipeline.
+
+**Method:** remove in a dedicated commit BEFORE building the Studio backend, run the
+existing pipeline end-to-end once (silence mode is fine) to confirm nothing broke,
+then proceed. This keeps the deletion isolated and easy to revert if something was
+load-bearing.
 
 ## Tech choices
 - **Backend:** FastAPI + `claude-agent-sdk` (Python ≥3.12, already the project's
