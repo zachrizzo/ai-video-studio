@@ -37,11 +37,20 @@ class PipelineConfig(BaseSettings):
     image_timeout_seconds: int = 900  # first run downloads a multi-GB model
 
     # Local video / motion generation
-    video_provider: Literal["kenburns", "comfyui"] = "kenburns"
+    #   kenburns = ffmpeg pan/zoom (fast, no model)
+    #   ltx      = real AI image-to-video via diffusers LTX-Video on MPS
+    #   comfyui  = AI image-to-video via a ComfyUI server
+    video_provider: Literal["kenburns", "ltx", "comfyui"] = "kenburns"
     kenburns_zoom: float = 1.12
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_model: str = "ltx"
-    video_fallback_to_kenburns: bool = True  # if comfyui fails, fall back to kenburns
+    video_fallback_to_kenburns: bool = True  # if ai video fails, fall back to kenburns
+    # LTX (diffusers) settings
+    ltx_model: str = "Lightricks/LTX-Video"
+    ltx_steps: int = 25
+    ltx_gen_width: int = 768
+    ltx_gen_height: int = 512
+    ltx_clip_seconds: float = 4.0
 
     # Pipeline Settings
     max_render_attempts: int = 5

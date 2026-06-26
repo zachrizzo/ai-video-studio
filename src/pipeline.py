@@ -255,7 +255,22 @@ def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
         direction = DIRECTIONS[scene_index % len(DIRECTIONS)]
         scene_index += 1
 
-        if config.video_provider == "comfyui":
+        if config.video_provider == "ltx":
+            from .videogen.ltx import generate_ltx_clip
+            result = generate_ltx_clip(
+                img, out, duration, prompt=seg.image_prompt or seg.section_title,
+                resolution=config.resolution, fps=config.frame_rate,
+                model_id=config.ltx_model, steps=config.ltx_steps,
+                gen_width=config.ltx_gen_width, gen_height=config.ltx_gen_height,
+                clip_seconds=config.ltx_clip_seconds, models_dir=config.models_dir,
+            )
+            if not result["success"] and config.video_fallback_to_kenburns:
+                console.print(f"[yellow]LTX failed ({result['error_message']}); Ken Burns fallback[/yellow]")
+                result = kenburns_clip(
+                    img, out, duration, resolution=config.resolution, fps=config.frame_rate,
+                    zoom=config.kenburns_zoom, direction=direction,
+                )
+        elif config.video_provider == "comfyui":
             from .videogen.comfyui import image_to_video
             result = image_to_video(
                 img, out, duration, resolution=config.resolution, fps=config.frame_rate,
