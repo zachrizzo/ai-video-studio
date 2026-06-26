@@ -74,12 +74,25 @@ def generate_image(
             error_message=f"mflux exited {proc.returncode}: {tail}",
         )
 
-    # mflux can exit 0 but fail to write under memory pressure — verify the file.
-    if not output_path.exists() or output_path.stat().st_size == 0:
+    # mflux appends a numeric suffix to --output (e.g. foo.png -> foo_1.png).
+    # Move the produced file to the exact requested path.
+    if not output_path.exists() or output_path.stat().st_size < 50_000:
+        suffix = output_path.suffix
+        stem = output_path.stem
+        candidates = sorted(
+            output_path.parent.glob(f"{stem}_*{suffix}"),
+            key=lambda p: p.stat().st_mtime,
+        )
+        if candidates:
+            produced = candidates[-1]
+            produced.replace(output_path)
+
+    # Verify a real image landed (mflux can exit 0 yet write nothing under OOM).
+    if not output_path.exists() or output_path.stat().st_size < 50_000:
         return ImageGenResult(
             segment_id=segment_id, image_path=output_path, success=False,
             width=width, height=height, seed=seed,
-            error_message="mflux exited 0 but produced no image (likely out of memory)",
+            error_message="mflux exited 0 but produced no usable image (likely out of memory)",
         )
 
     console.print(f"[green]  -> {output_path} ({output_path.stat().st_size // 1024} KB)[/green]")
