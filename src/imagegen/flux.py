@@ -4,6 +4,7 @@ Runs `mflux-generate` as a subprocess so model memory is freed after each image
 and the first-run model download is isolated. No server required.
 """
 
+import os
 import subprocess
 from pathlib import Path
 
@@ -25,6 +26,7 @@ def generate_image(
     quantize: int = 4,
     seed: int | None = None,
     timeout: int = 900,
+    models_dir: str = "",
 ) -> ImageGenResult:
     """Generate a single still image with mflux and write it to output_path.
 
@@ -50,8 +52,13 @@ def generate_image(
     console.print(f"[blue]FLUX {segment_id or output_path.stem}: {model} {width}x{height} ({steps} steps)[/blue]")
     console.print(f"  [dim]{prompt[:90]}{'…' if len(prompt) > 90 else ''}[/dim]")
 
+    # Route the (multi-GB) HuggingFace hub download cache to an external drive if set.
+    env = dict(os.environ)
+    if models_dir:
+        env["HF_HUB_CACHE"] = str(Path(models_dir).expanduser())
+
     try:
-        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout)
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout, env=env)
     except subprocess.TimeoutExpired:
         return ImageGenResult(
             segment_id=segment_id, image_path=output_path, success=False,

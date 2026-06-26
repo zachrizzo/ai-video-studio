@@ -28,6 +28,10 @@ class PipelineConfig(BaseSettings):
     image_provider: Literal["mflux", "none"] = "mflux"
     image_model: str = "schnell"
     image_steps: int = 4  # schnell/turbo ~4-8; dev ~20-25
+    # Where large model weights are cached (HuggingFace hub cache). Set to an
+    # external drive to keep multi-GB models off the internal disk. Empty = default
+    # (~/.cache/huggingface). The HF auth token stays in the default location.
+    models_dir: str = ""
     image_quantize: int = 4  # mflux -q (4 or 8); 4 = lowest memory
     image_force: bool = False  # regenerate even if a PNG already exists
     image_timeout_seconds: int = 900  # first run downloads a multi-GB model

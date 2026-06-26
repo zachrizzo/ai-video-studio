@@ -192,6 +192,7 @@ def cmd_imagegen(script_json: str, run_dir: str, segment_ids: str = ""):
             prompt=seg.image_prompt, output_path=out, segment_id=seg.segment_id,
             width=w, height=h, steps=config.image_steps, model=config.image_model,
             quantize=config.image_quantize, timeout=config.image_timeout_seconds,
+            models_dir=config.models_dir,
         )
         if result.success:
             generated.append(seg.segment_id)
