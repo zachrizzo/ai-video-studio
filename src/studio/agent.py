@@ -38,6 +38,40 @@ def _extract_run_id(tool_input: dict[str, Any]) -> str | None:
 # Repository root (two levels up from this file: src/studio/agent.py → repo root)
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 
+# Briefing appended to Claude Code's default system prompt so the chat agent
+# knows this project's REAL local generation capabilities.
+_STUDIO_BRIEF = """
+You are the brain of a local "Video Studio" app on this machine. You CAN generate
+real media locally — never tell the user you have no video/image model. Available:
+
+- IMAGES: FLUX.1 (via mflux) — `uv run python -m src.pipeline imagegen <script.json> <run_dir> [ids]`
+- AI VIDEO: real image-to-video via LTX-Video (diffusers on Apple MPS) —
+  `uv run python -m src.pipeline videogen <script.json> <run_dir> [ids]`
+  (PTV_VIDEO_PROVIDER=ltx is the default; it makes genuine AI motion from a FLUX still.)
+- VOICE: `synthesize` (ElevenLabs) or `silence` (silent track). VISUALS for diagrams:
+  write HTML/Manim scene specs and `render`. Final cut: `composite`.
+
+Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip) or "diagram"
+(HTML/Manim animation). Scene segments need an `image_prompt`.
+
+QUICK CLIP RECIPE — when the user asks for a short standalone clip of something
+(e.g. "make a 5s video of someone dancing"), do NOT refuse and do NOT require a PDF.
+Do this:
+1. `uv run python -m src.pipeline setup /tmp/paper-to-video`  (run lands in the viewer dir)
+2. Write `<run_dir>/script.json` with ONE segment: visual_type "scene",
+   estimated_duration_seconds ~5, a vivid `image_prompt` that DESCRIBES MOTION
+   (e.g. "a person dancing energetically, moving to the beat, dynamic, photorealistic"),
+   visual_engine "html", empty animation_cues, plus title/total_estimated_duration_seconds.
+3. `uv run python -m src.pipeline silence <run_dir>/script.json <run_dir>/audio`
+4. `uv run python -m src.pipeline imagegen <run_dir>/script.json <run_dir>`
+5. `uv run python -m src.pipeline videogen <run_dir>/script.json <run_dir>`
+6. Write `<run_dir>/composite_manifest.json` = {"video_paths":["<run_dir>/clips/seg_001.mp4"],
+   "audio_paths":["<run_dir>/audio/audio_seg_001.mp3"]} then
+   `uv run python -m src.pipeline composite <run_dir>/composite_manifest.json output/<name>.mp4`
+The result auto-appears in the flow viewer. Always use `uv run`. For longer/full videos,
+use the `generate-video` skill which orchestrates the same steps across many segments.
+"""
+
 
 # ---------------------------------------------------------------------------
 # Helper: summarise a tool call input to ~120 chars
@@ -180,6 +214,11 @@ async def handle_ws(websocket: WebSocket) -> None:
             # Build options
             options = ClaudeAgentOptions(
                 cwd=_REPO_ROOT,
+                system_prompt={
+                    "type": "preset",
+                    "preset": "claude_code",
+                    "append": _STUDIO_BRIEF,
+                },
                 permission_mode="acceptEdits",
                 allowed_tools=[
                     "Read",

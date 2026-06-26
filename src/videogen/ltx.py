@@ -47,6 +47,27 @@ def _load_pipe(model_id: str, models_dir: str):
     return pipe
 
 
+def _finalize_trim(clip: Path, output_path: Path, duration_seconds: float,
+                   resolution: tuple[int, int], fps: int) -> dict:
+    """Scale/crop a clip to the target res and trim to the exact duration.
+    Used when the AI clip is already long enough — preserves continuous motion
+    (no boomerang), which looks far less static."""
+    w, h = resolution
+    vf = (
+        f"scale={w}:{h}:force_original_aspect_ratio=increase,"
+        f"crop={w}:{h},fps={fps},trim=duration={duration_seconds:.3f},setpts=PTS-STARTPTS"
+    )
+    proc = subprocess.run(
+        ["ffmpeg", "-y", "-i", str(clip), "-vf", vf, "-r", str(fps),
+         "-c:v", "libx264", "-preset", "fast", "-crf", "18",
+         "-pix_fmt", "yuv420p", "-an", str(output_path)],
+        capture_output=True, text=True, timeout=300,
+    )
+    if proc.returncode != 0 or not output_path.exists():
+        return {"success": False, "error_message": f"finalize failed: {proc.stderr[-400:]}"}
+    return {"success": True}
+
+
 def _extend_to_duration(clip: Path, output_path: Path, duration_seconds: float,
                         resolution: tuple[int, int], fps: int) -> dict:
     """Make a seamless boomerang from a short clip, then loop it to the exact
@@ -119,18 +140,24 @@ def generate_ltx_clip(
 
         gw = _round_to(gen_width, 32)
         gh = _round_to(gen_height, 32)
-        # LTX wants num_frames = 8k + 1
         gen_fps = 24
-        raw = int(clip_seconds * gen_fps)
-        num_frames = _round_to(raw, 8) + 1
+        # Generate enough frames to cover the whole target duration when feasible
+        # (so we can keep continuous motion). Cap frames to stay numerically stable
+        # on MPS; beyond the cap we loop a shorter clip.
+        MAX_FRAMES = 161  # ~6.7s at 24fps — safe on MPS at <=704x448
+        want = max(int(duration_seconds * gen_fps), int(clip_seconds * gen_fps))
+        num_frames = min(_round_to(want, 8) + 1, MAX_FRAMES)
+        covers = (num_frames / gen_fps) >= duration_seconds - 0.05
 
-        console.print(f"[blue]LTX i2v: {image_path.stem} {gw}x{gh} {num_frames}f {steps} steps[/blue]")
+        console.print(f"[blue]LTX i2v: {image_path.stem} {gw}x{gh} {num_frames}f {steps} steps"
+                      f" ({'direct' if covers else 'loop'})[/blue]")
         image = load_image(str(image_path))
-        motion_prompt = (prompt + ", subtle natural motion, cinematic").strip(", ")
+        # Add explicit motion language so the clip doesn't read as a still.
+        motion_prompt = (prompt + ", dynamic motion, things moving, lively, cinematic").strip(", ")
         result = pipe(
             image=image,
             prompt=motion_prompt,
-            negative_prompt="worst quality, blurry, distorted, jittery, static",
+            negative_prompt="static, frozen, still image, no motion, worst quality, blurry, distorted",
             width=gw, height=gh, num_frames=num_frames,
             num_inference_steps=steps,
             generator=torch.Generator(device="cpu").manual_seed(0),
@@ -140,7 +167,11 @@ def generate_ltx_clip(
         with tempfile.TemporaryDirectory() as td:
             short = Path(td) / "ltx_short.mp4"
             export_to_video(frames, str(short), fps=gen_fps)
-            ext = _extend_to_duration(short, output_path, duration_seconds, resolution, fps)
+            # Continuous motion when the clip covers the duration; otherwise loop.
+            if covers:
+                ext = _finalize_trim(short, output_path, duration_seconds, resolution, fps)
+            else:
+                ext = _extend_to_duration(short, output_path, duration_seconds, resolution, fps)
             if not ext["success"]:
                 return {"success": False, "video_path": str(output_path),
                         "duration": None, "error_message": ext["error_message"]}
