@@ -45,12 +45,13 @@ class PipelineConfig(BaseSettings):
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_model: str = "ltx"
     video_fallback_to_kenburns: bool = True  # if ai video fails, fall back to kenburns
-    # LTX (diffusers) settings
+    # LTX (diffusers) settings. Conservative defaults — larger/longer generations
+    # get numerically unstable (noisy) on MPS bf16; ~704x448 / ~3s is reliable.
     ltx_model: str = "Lightricks/LTX-Video"
-    ltx_steps: int = 25
-    ltx_gen_width: int = 768
-    ltx_gen_height: int = 512
-    ltx_clip_seconds: float = 4.0
+    ltx_steps: int = 15
+    ltx_gen_width: int = 704
+    ltx_gen_height: int = 448
+    ltx_clip_seconds: float = 3.0
 
     # Pipeline Settings
     max_render_attempts: int = 5
