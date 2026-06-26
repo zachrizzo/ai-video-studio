@@ -183,7 +183,7 @@ async def handle_ws(websocket: WebSocket) -> None:
             )
 
             try:
-                async for event in await query(prompt=user_text, options=options):
+                async for event in query(prompt=user_text, options=options):
                     # ---- SystemMessage: capture session_id ----
                     if isinstance(event, SystemMessage):
                         new_sid = event.data.get("session_id")
