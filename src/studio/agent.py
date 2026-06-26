@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -19,6 +20,20 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 logger = logging.getLogger(__name__)
+
+# Matches a run id (run_<8+ hex>) inside a command string or file path so the
+# artifact hook can tell the viewer which run was just touched.
+_RUN_ID_RE = re.compile(r"run_[0-9a-f]{6,}")
+
+
+def _extract_run_id(tool_input: dict[str, Any]) -> str | None:
+    for key in ("command", "file_path", "path"):
+        val = tool_input.get(key)
+        if isinstance(val, str):
+            m = _RUN_ID_RE.search(val)
+            if m:
+                return m.group(0)
+    return None
 
 # Repository root (two levels up from this file: src/studio/agent.py → repo root)
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
@@ -117,10 +132,15 @@ async def handle_ws(websocket: WebSocket) -> None:
         _transcript: str | None,
         _ctx: HookContext,
     ) -> dict[str, Any]:
+        nonlocal active_run_id
         tool_name: str = hook_input.get("tool_name", "")
         if tool_name in _ARTIFACT_TOOLS:
-            run_id = active_run_id or "unknown"
-            await artifact_queue.put(run_id)
+            # Prefer a run id parsed from the tool input (catches brand-new runs
+            # created mid-conversation); fall back to the viewed run.
+            run_id = _extract_run_id(hook_input.get("tool_input", {}) or {})
+            if run_id:
+                active_run_id = run_id
+            await artifact_queue.put(active_run_id or "unknown")
         return {}
 
     # -----------------------------------------------------------------------
@@ -202,19 +222,8 @@ async def handle_ws(websocket: WebSocket) -> None:
                                 text = delta.get("text", "")
                                 if text:
                                     await _send({"type": "assistant_text", "text": text})
-
-                        elif ev_type == "content_block_start":
-                            block = ev.get("content_block", {})
-                            if block.get("type") == "tool_use":
-                                tool_name = block.get("name", "")
-                                # input may come later; emit with empty summary for now
-                                await _send(
-                                    {
-                                        "type": "tool_use",
-                                        "name": tool_name,
-                                        "summary": tool_name,
-                                    }
-                                )
+                        # Tool-use events are emitted from AssistantMessage below
+                        # (with full summaries) to avoid duplicate activity lines.
 
                     # ---- AssistantMessage: completed turn ----
                     elif isinstance(event, AssistantMessage):
@@ -223,12 +232,9 @@ async def handle_ws(websocket: WebSocket) -> None:
                             await _send({"type": "session", "session_id": session_id})
 
                         for block in event.content:
-                            if isinstance(block, TextBlock):
-                                if block.text:
-                                    await _send(
-                                        {"type": "assistant_text", "text": block.text}
-                                    )
-                            elif isinstance(block, ToolUseBlock):
+                            # TextBlock is skipped: the live text already arrived via
+                            # StreamEvent text_delta; re-sending it would duplicate.
+                            if isinstance(block, ToolUseBlock):
                                 summary = _tool_summary(block.name, block.input)
                                 await _send(
                                     {

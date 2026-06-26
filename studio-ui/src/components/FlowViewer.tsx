@@ -44,6 +44,22 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
       .finally(() => setLoadingRuns(false))
   }, [onRunIdChange])
 
+  // ── When an artifact event arrives, refresh the run list. If it names a run
+  //    we don't have selected (e.g. a brand-new chat-created run), switch to it.
+  useEffect(() => {
+    if (!artifactRefreshRunId) return
+    fetchRuns()
+      .then((r) => {
+        setRuns(r)
+        const known = r.some((x) => x.id === artifactRefreshRunId)
+        if (known && artifactRefreshRunId !== selectedId) {
+          setSelectedId(artifactRefreshRunId)
+          onRunIdChange(artifactRefreshRunId)
+        }
+      })
+      .catch(() => {})
+  }, [artifactRefreshRunId, selectedId, onRunIdChange])
+
   // ── Load run detail whenever selected run changes ─────────────────────────
   const loadDetail = useCallback((runId: string) => {
     setLoadingDetail(true)

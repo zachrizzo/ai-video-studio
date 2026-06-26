@@ -85,15 +85,22 @@ export function ChatPanel({ currentRunId, onArtifactUpdated, onConnectionChange 
         case 'tool_use':
           updateActiveAssistant((m) => ({
             ...m,
-            tools: [...m.tools, { id: nextId(), name: msg.name, summary: msg.summary, status: 'running' }],
+            // Tools run sequentially here: when a new one starts, mark prior
+            // still-running tools as done. Any straggler resolves on 'done'.
+            tools: [
+              ...m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'done' as ToolStatus } : t)),
+              { id: nextId(), name: msg.name, summary: msg.summary, status: 'running' },
+            ],
           }))
           break
         case 'tool_result':
           updateActiveAssistant((m) => {
-            // Mark the last running tool with this name as done/failed.
+            // Mark the last running tool done/failed. Match by name when provided,
+            // otherwise resolve the most recent still-running tool.
             const tools = [...m.tools]
             for (let i = tools.length - 1; i >= 0; i--) {
-              if (tools[i].name === msg.name && tools[i].status === 'running') {
+              const nameMatches = !msg.name || tools[i].name === msg.name
+              if (nameMatches && tools[i].status === 'running') {
                 tools[i] = { ...tools[i], status: msg.ok ? 'done' : 'failed' }
                 break
               }
@@ -105,7 +112,12 @@ export function ChatPanel({ currentRunId, onArtifactUpdated, onConnectionChange 
           onArtifactUpdated(msg.run_id)
           break
         case 'done':
-          updateActiveAssistant((m) => ({ ...m, streaming: false }))
+          updateActiveAssistant((m) => ({
+            ...m,
+            streaming: false,
+            // Resolve any tools still marked running at end of turn.
+            tools: m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'done' as ToolStatus } : t)),
+          }))
           activeAssistantId.current = null
           setBusy(false)
           break

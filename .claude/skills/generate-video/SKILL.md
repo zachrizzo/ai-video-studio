@@ -18,15 +18,16 @@ You are the orchestrator. You do ALL the thinking — analyzing the paper, writi
 uv run python -m src.pipeline setup /tmp/paper-to-video
 ```
 This returns JSON with `run_dir`, `audio_dir`, `video_dir`, `scenes_dir`. Save these paths.
+(When driven by the Studio app, `STUDIO_RUNS_DIR` is set and the run is created there
+automatically so the flow viewer picks it up — the path arg is overridden.)
 
-## Step 2: Parse the Paper
-```bash
-uv run python -m src.pipeline parse "$ARGUMENTS" <run_dir>
-```
-Then read the generated `<run_dir>/paper.md` to understand the paper content.
+## Step 2: Understand the Source
+The input is a **topic or request** (string), not necessarily a PDF. Read it carefully.
+If a PDF path is given, read it; otherwise work directly from the topic and your own
+knowledge. There is no `parse` step — you are the brain.
 
-## Step 3: Analyze the Paper (YOU do this)
-Read the paper markdown. Then write a JSON file at `<run_dir>/analysis.json`:
+## Step 3: Analyze (YOU do this)
+Write a JSON file at `<run_dir>/analysis.json` capturing the core idea and concepts:
 ```json
 {
     "core_contribution": "One sentence",

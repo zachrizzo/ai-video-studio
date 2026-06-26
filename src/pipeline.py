@@ -300,12 +300,30 @@ def cmd_composite(manifest_json: str, output_path: str):
 
     console.print(f"[green]Final video: {final}[/green]")
 
+    # Also drop a copy at <run_dir>/final.mp4 so the Studio viewer shows it.
+    # The manifest lives in the run dir, so its parent is the run dir.
+    import shutil
+    run_dir = Path(manifest_json).resolve().parent
+    run_final = run_dir / "final.mp4"
+    try:
+        if Path(final).resolve() != run_final.resolve():
+            shutil.copy(final, run_final)
+            console.print(f"[green]Viewer copy: {run_final}[/green]")
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]Could not write viewer copy: {exc}[/yellow]")
+
 
 def cmd_setup(base_dir: str):
-    """Create working directories for a pipeline run."""
+    """Create working directories for a pipeline run.
+
+    If STUDIO_RUNS_DIR is set (e.g. when driven by the Studio app), runs are
+    created there so the flow viewer picks them up — overriding base_dir.
+    """
+    import os
     from .utils.file_manager import FileManager
 
-    fm = FileManager(Path(base_dir))
+    base = os.environ.get("STUDIO_RUNS_DIR") or base_dir
+    fm = FileManager(Path(base))
     run_dir = fm.setup()
 
     print(json.dumps({
