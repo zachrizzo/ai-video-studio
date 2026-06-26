@@ -47,8 +47,8 @@ class PipelineConfig(BaseSettings):
     video_fallback_to_kenburns: bool = True  # if ai video fails, fall back to kenburns
     # LTX (diffusers) settings. Conservative defaults — larger/longer generations
     # get numerically unstable (noisy) on MPS bf16; ~704x448 / ~3s is reliable.
-    ltx_model: str = "Lightricks/LTX-Video"
-    ltx_steps: int = 15
+    ltx_model: str = "Lightricks/LTX-Video-0.9.7-distilled"
+    ltx_steps: int = 30
     ltx_gen_width: int = 704
     ltx_gen_height: int = 448
     ltx_clip_seconds: float = 3.0

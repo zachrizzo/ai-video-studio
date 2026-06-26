@@ -37,11 +37,12 @@ def _load_pipe(model_id: str, models_dir: str):
         return _PIPE
     _set_cache(models_dir)
     import torch
-    from diffusers import LTXImageToVideoPipeline
+    from diffusers import LTXConditionPipeline
 
     console.print(f"[blue]Loading LTX pipeline: {model_id} (first run downloads weights)…[/blue]")
-    pipe = LTXImageToVideoPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
+    pipe = LTXConditionPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
     pipe.to("mps")
+    pipe.vae.enable_tiling()
     _PIPE = pipe
     _PIPE_KEY = key
     return pipe
@@ -135,6 +136,7 @@ def generate_ltx_clip(
     try:
         import torch
         from diffusers.utils import export_to_video, load_image
+        from diffusers.pipelines.ltx.pipeline_ltx_condition import LTXVideoCondition
 
         pipe = _load_pipe(model_id, models_dir)
 
@@ -142,9 +144,8 @@ def generate_ltx_clip(
         gh = _round_to(gen_height, 32)
         gen_fps = 24
         # Generate enough frames to cover the whole target duration when feasible
-        # (so we can keep continuous motion). Cap frames to stay numerically stable
-        # on MPS; beyond the cap we loop a shorter clip.
-        MAX_FRAMES = 161  # ~6.7s at 24fps — safe on MPS at <=704x448
+        # (continuous motion). Cap to stay stable on MPS; beyond it we loop.
+        MAX_FRAMES = 161  # ~6.7s at 24fps
         want = max(int(duration_seconds * gen_fps), int(clip_seconds * gen_fps))
         num_frames = min(_round_to(want, 8) + 1, MAX_FRAMES)
         covers = (num_frames / gen_fps) >= duration_seconds - 0.05
@@ -152,16 +153,29 @@ def generate_ltx_clip(
         console.print(f"[blue]LTX i2v: {image_path.stem} {gw}x{gh} {num_frames}f {steps} steps"
                       f" ({'direct' if covers else 'loop'})[/blue]")
         image = load_image(str(image_path))
-        # Add explicit motion language so the clip doesn't read as a still.
-        motion_prompt = (prompt + ", dynamic motion, things moving, lively, cinematic").strip(", ")
-        result = pipe(
-            image=image,
-            prompt=motion_prompt,
-            negative_prompt="static, frozen, still image, no motion, worst quality, blurry, distorted",
+        # Image conditioning on the first frame; strength<1.0 frees the model to
+        # add motion instead of freezing on the still.
+        condition = LTXVideoCondition(image=image, frame_index=0, strength=1.0)
+        motion_prompt = (prompt + ", dynamic motion, cinematic").strip(", ")
+        negative = "static, frozen, still image, no motion, worst quality, inconsistent motion, blurry, jittery, distorted"
+        common = dict(
+            conditions=[condition], prompt=motion_prompt, negative_prompt=negative,
             width=gw, height=gh, num_frames=num_frames,
-            num_inference_steps=steps,
+            decode_timestep=0.05, decode_noise_scale=0.025, image_cond_noise_scale=0.0,
             generator=torch.Generator(device="cpu").manual_seed(0),
         )
+        if "distilled" in model_id:
+            # Distilled: guidance-distilled (guidance 1.0) with the documented
+            # custom timesteps; keeps the clip stable + moving.
+            result = pipe(
+                **common, guidance_scale=1.0, guidance_rescale=0.7,
+                timesteps=[1000, 993, 987, 981, 975, 909, 725, 0.03],
+            )
+        else:
+            result = pipe(
+                **common, guidance_scale=5.0, guidance_rescale=0.7,
+                num_inference_steps=steps,
+            )
         frames = result.frames[0]
 
         with tempfile.TemporaryDirectory() as td:

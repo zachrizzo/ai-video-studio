@@ -16,11 +16,33 @@ Commands:
 
 import json
 import sys
+from contextlib import contextmanager
 from pathlib import Path
 
 from rich.console import Console
 
 console = Console()
+
+# Cross-process lock so only ONE heavy generation (FLUX image or LTX video) runs
+# at a time. On Apple MPS, concurrent generations cause memory pressure and noisy
+# output. A second generation BLOCKS until the first releases the lock.
+_GEN_LOCK_PATH = "/tmp/video-studio-gen.lock"
+
+
+@contextmanager
+def _generation_lock():
+    import fcntl
+    lock_file = open(_GEN_LOCK_PATH, "w")
+    try:
+        try:
+            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            console.print("[yellow]Another generation is running — waiting for it to finish…[/yellow]")
+            fcntl.flock(lock_file, fcntl.LOCK_EX)  # block until free
+        yield
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()
 
 
 def cmd_synthesize(script_json: str, output_dir: str):
@@ -188,12 +210,13 @@ def cmd_imagegen(script_json: str, run_dir: str, segment_ids: str = ""):
             skipped.append(seg.segment_id)
             console.print(f"[dim]Skip (exists): {seg.segment_id}[/dim]")
             continue
-        result = generate_image(
-            prompt=seg.image_prompt, output_path=out, segment_id=seg.segment_id,
-            width=w, height=h, steps=config.image_steps, model=config.image_model,
-            quantize=config.image_quantize, timeout=config.image_timeout_seconds,
-            models_dir=config.models_dir,
-        )
+        with _generation_lock():  # never run two generations at once (MPS)
+            result = generate_image(
+                prompt=seg.image_prompt, output_path=out, segment_id=seg.segment_id,
+                width=w, height=h, steps=config.image_steps, model=config.image_model,
+                quantize=config.image_quantize, timeout=config.image_timeout_seconds,
+                models_dir=config.models_dir,
+            )
         if result.success:
             generated.append(seg.segment_id)
         else:
@@ -257,13 +280,14 @@ def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
 
         if config.video_provider == "ltx":
             from .videogen.ltx import generate_ltx_clip
-            result = generate_ltx_clip(
-                img, out, duration, prompt=seg.image_prompt or seg.section_title,
-                resolution=config.resolution, fps=config.frame_rate,
-                model_id=config.ltx_model, steps=config.ltx_steps,
-                gen_width=config.ltx_gen_width, gen_height=config.ltx_gen_height,
-                clip_seconds=config.ltx_clip_seconds, models_dir=config.models_dir,
-            )
+            with _generation_lock():  # never run two generations at once (MPS)
+                result = generate_ltx_clip(
+                    img, out, duration, prompt=seg.image_prompt or seg.section_title,
+                    resolution=config.resolution, fps=config.frame_rate,
+                    model_id=config.ltx_model, steps=config.ltx_steps,
+                    gen_width=config.ltx_gen_width, gen_height=config.ltx_gen_height,
+                    clip_seconds=config.ltx_clip_seconds, models_dir=config.models_dir,
+                )
             if not result["success"] and config.video_fallback_to_kenburns:
                 console.print(f"[yellow]LTX failed ({result['error_message']}); Ken Burns fallback[/yellow]")
                 result = kenburns_clip(
