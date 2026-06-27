@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 2
 requires-python = ">=3.12"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -555,8 +555,8 @@ wheels = [
 
 [[package]]
 name = "diffusers"
-version = "0.38.0"
-source = { registry = "https://pypi.org/simple" }
+version = "0.39.0.dev0"
+source = { git = "https://github.com/huggingface/diffusers#bd2c91958881b777260eedb1c3d61d01c03e800f" }
 dependencies = [
     { name = "filelock" },
     { name = "httpx" },
@@ -567,10 +567,6 @@ dependencies = [
     { name = "regex" },
     { name = "requests" },
     { name = "safetensors" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/01/ed/255d3dfd4a2271dffc8f1895f9d2720b3bf1beaecf02148bb5604439e594/diffusers-0.38.0.tar.gz", hash = "sha256:1e094ec5c16f18c42fb89d37f07a94cf9aab3ebbe527ab059c609597b8857626", size = 4328401, upload-time = "2026-05-01T05:42:15.276Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/42/c0/3237566ea6e3a542f3c0669a253d62fe75f27b84b3d7bd4fb3b5ee89d73c/diffusers-0.38.0-py3-none-any.whl", hash = "sha256:18e53f9e539096320470f62c6360a6fd5727ff28cffda566265316e13fcdb612", size = 5245919, upload-time = "2026-05-01T05:42:12.779Z" },
 ]
 
 [[package]]
@@ -1922,6 +1918,7 @@ dependencies = [
     { name = "elevenlabs" },
     { name = "fastapi" },
     { name = "ffmpeg-python" },
+    { name = "httpx" },
     { name = "imageio" },
     { name = "imageio-ffmpeg" },
     { name = "manim" },
@@ -1931,6 +1928,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "pydub" },
     { name = "python-dotenv" },
+    { name = "python-multipart" },
     { name = "rich" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -1950,10 +1948,11 @@ voice-record = [
 requires-dist = [
     { name = "accelerate", specifier = ">=1.14.0" },
     { name = "claude-agent-sdk", specifier = ">=0.2.110" },
-    { name = "diffusers", specifier = ">=0.38.0" },
+    { name = "diffusers", git = "https://github.com/huggingface/diffusers" },
     { name = "elevenlabs", specifier = ">=1.15.0" },
     { name = "fastapi", specifier = ">=0.138.0" },
     { name = "ffmpeg-python", specifier = ">=0.2.0" },
+    { name = "httpx", specifier = ">=0.27.0" },
     { name = "imageio", specifier = ">=2.37.3" },
     { name = "imageio-ffmpeg", specifier = ">=0.6.0" },
     { name = "manim", specifier = ">=0.18.0" },
@@ -1965,6 +1964,7 @@ requires-dist = [
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0.0" },
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23.0" },
     { name = "python-dotenv", specifier = ">=1.0.0" },
+    { name = "python-multipart", specifier = ">=0.0.9" },
     { name = "rich", specifier = ">=13.0.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4.0" },
     { name = "sounddevice", marker = "extra == 'voice-record'", specifier = ">=0.4.6" },

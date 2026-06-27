@@ -13,6 +13,7 @@ from typing import Any
 
 # Default location; overridden by env var STUDIO_RUNS_DIR
 RUNS_ROOT = Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+PRODUCTION_STATUS_FILE = ".production_status.json"
 
 
 def _runs_root() -> Path:
@@ -33,6 +34,12 @@ def _load_json(path: Path) -> dict[str, Any]:
         return {}
 
 
+def _load_production_status(run_dir: Path) -> dict[str, Any] | None:
+    """Load persisted producer state for a run, if present."""
+    status = _load_json(run_dir / PRODUCTION_STATUS_FILE)
+    return status or None
+
+
 def _scene_url(run_dir: Path, segment_id: str) -> str | None:
     """Return the media URL for a rendered scene mp4, or None if not present."""
     render_dir = run_dir / "scenes" / f"{segment_id}_render"
@@ -46,55 +53,131 @@ def _scene_url(run_dir: Path, segment_id: str) -> str | None:
 
 def _audio_url(run_dir: Path, segment_id: str) -> str | None:
     """Return the media URL for a segment's audio file, or None."""
-    # The audio files are named audio_{segment_id}.mp3
-    mp3 = run_dir / "audio" / f"audio_{segment_id}.mp3"
-    if mp3.exists():
-        run_id = run_dir.name
-        return f"/media/{run_id}/audio/audio_{segment_id}.mp3"
+    for ext in (".mp3", ".wav", ".m4a"):
+        audio = run_dir / "audio" / f"audio_{segment_id}{ext}"
+        if audio.exists():
+            run_id = run_dir.name
+            return f"/media/{run_id}/audio/audio_{segment_id}{ext}"
     return None
 
 
-def _image_url(run_dir: Path, segment_id: str) -> str | None:
-    """Return the media URL for a segment's still image, or None."""
-    png = run_dir / "images" / f"{segment_id}.png"
-    if png.exists():
-        run_id = run_dir.name
-        return f"/media/{run_id}/images/{segment_id}.png"
-    return None
+def _visual_stems(seg: dict[str, Any]) -> list[str]:
+    """Return expected generated visual file stems for a raw segment dict."""
+    seg_id = seg.get("segment_id", "")
+    if not seg_id or seg.get("visual_type") != "scene":
+        return []
+    beats = seg.get("visual_beats") or []
+    if beats:
+        if len(beats) == 1:
+            return [seg_id]
+        return [f"{seg_id}_b{i:02d}" for i in range(1, len(beats) + 1)]
+    if seg.get("image_prompt"):
+        return [seg_id]
+    return []
 
 
-def _clip_url(run_dir: Path, segment_id: str) -> str | None:
-    """Return the media URL for a composite clip, or None."""
-    mp4 = run_dir / "clips" / f"{segment_id}.mp4"
-    if mp4.exists():
-        run_id = run_dir.name
-        return f"/media/{run_id}/clips/{segment_id}.mp4"
-    return None
+def _image_urls(run_dir: Path, seg: dict[str, Any]) -> list[str]:
+    """Return media URLs for a segment's generated beat stills."""
+    run_id = run_dir.name
+    urls: list[str] = []
+    for stem in _visual_stems(seg):
+        png = run_dir / "images" / f"{stem}.png"
+        if png.exists():
+            urls.append(f"/media/{run_id}/images/{stem}.png")
+    seg_id = seg.get("segment_id", "")
+    legacy = run_dir / "images" / f"{seg_id}.png"
+    if not urls and legacy.exists():
+        urls.append(f"/media/{run_id}/images/{seg_id}.png")
+    return urls
+
+
+def _clip_urls(run_dir: Path, seg: dict[str, Any]) -> list[str]:
+    """Return media URLs for a segment's generated beat clips."""
+    run_id = run_dir.name
+    urls: list[str] = []
+    for stem in _visual_stems(seg):
+        mp4 = run_dir / "clips" / f"{stem}.mp4"
+        if mp4.exists():
+            urls.append(f"/media/{run_id}/clips/{stem}.mp4")
+    seg_id = seg.get("segment_id", "")
+    legacy = run_dir / "clips" / f"{seg_id}.mp4"
+    if not urls and legacy.exists():
+        urls.append(f"/media/{run_id}/clips/{seg_id}.mp4")
+    return urls
+
+
+def _script_storyboard(seg: dict[str, Any]) -> list[dict[str, Any]]:
+    beats = seg.get("visual_beats") or []
+    if not beats:
+        return []
+    stems = _visual_stems(seg)
+    frames: list[dict[str, Any]] = []
+    for index, beat in enumerate(beats):
+        stem = stems[index] if index < len(stems) else f"{seg.get('segment_id', '')}_b{index + 1:02d}"
+        frames.append(
+            {
+                "frame_id": stem,
+                "beat_id": beat.get("beat_id") or f"b{index + 1:02d}",
+                "description": beat.get("description"),
+                "shot_type": beat.get("shot_type"),
+                "composition": beat.get("composition"),
+                "action": beat.get("action"),
+                "camera_motion": beat.get("camera_motion"),
+                "transition": beat.get("transition"),
+                "duration_seconds": beat.get("duration_seconds"),
+                "continuity_notes": beat.get("continuity_notes") or [],
+                "asset_notes": beat.get("asset_notes") or [],
+            }
+        )
+    return frames
 
 
 def _segment_status(
     run_dir: Path,
-    segment_id: str,
+    seg: dict[str, Any],
     scene_url: str | None,
-    clip_url: str | None,
+    image_urls: list[str],
+    clip_urls: list[str],
     audio_url: str | None,
+    qa_segment: dict[str, Any] | None = None,
 ) -> str:
     """Derive the status string for a segment.
 
     Rules (in priority order):
     1. ``failed``     – fallback mp4 marker exists.
-    2. ``done``       – (scene_url or clip_url) AND audio_url present.
-    3. ``generating`` – some but not all expected artifacts exist.
-    4. ``pending``    – nothing exists yet.
+    2. ``qa_failed``  – artifacts exist but segment QA has errors.
+    3. ``needs_review`` – artifacts exist but segment QA has warnings.
+    4. ``approved``   – artifacts exist and segment QA passed.
+    5. ``done``       – artifacts exist but no QA report exists yet.
+    6. ``generating`` – some but not all expected artifacts exist.
+    7. ``pending``    – nothing exists yet.
     """
+    segment_id = seg.get("segment_id", "")
     fallback = (
         run_dir / "scenes" / f"{segment_id}_render" / f"{segment_id}_fallback.mp4"
     )
     if fallback.exists():
         return "failed"
-    if (scene_url or clip_url) and audio_url:
+
+    if seg.get("visual_type") == "scene":
+        expected_visuals = len(_visual_stems(seg)) or 1
+        visual_ready = len(clip_urls) >= expected_visuals
+        visual_partial = bool(image_urls or clip_urls)
+    else:
+        visual_ready = bool(scene_url)
+        visual_partial = bool(scene_url)
+
+    if visual_ready and audio_url:
+        if qa_segment:
+            qa_status = qa_segment.get("status")
+            if qa_status == "failed":
+                return "qa_failed"
+            if qa_status == "warning":
+                return "needs_review"
+            if qa_status == "passed":
+                return "approved"
         return "done"
-    if scene_url or clip_url or audio_url:
+    if visual_partial or audio_url:
         return "generating"
     return "pending"
 
@@ -123,6 +206,8 @@ def list_runs() -> list[dict[str, Any]]:
         segments = script.get("segments", [])
         has_final = (child / "final.mp4").exists()
         final_url = f"/media/{run_id}/final.mp4" if has_final else None
+        qa_report = _load_json(child / "qa_report.json")
+        production = _load_production_status(child)
         results.append(
             {
                 "id": run_id,
@@ -130,6 +215,8 @@ def list_runs() -> list[dict[str, Any]]:
                 "segment_count": len(segments),
                 "has_final_video": has_final,
                 "final_video_url": final_url,
+                "qa_status": qa_report.get("status"),
+                "production": production,
             }
         )
     return results
@@ -147,10 +234,19 @@ def get_run(run_id: str) -> dict[str, Any] | None:
 
     # Audio manifest: keyed by segment_id → {audio_path, duration_seconds}
     audio_manifest = _load_json(run_dir / "audio" / "audio_manifest.json")
+    qa_report = _load_json(run_dir / "qa_report.json")
+    qa_segments = qa_report.get("segments", {}) if isinstance(qa_report, dict) else {}
+    storyboard_report = _load_json(run_dir / "storyboard.json")
+    storyboard_segments = {
+        item.get("segment_id"): item.get("frames", [])
+        for item in storyboard_report.get("segments", [])
+        if isinstance(item, dict)
+    }
 
     title = script.get("title", run_id)
     has_final = (run_dir / "final.mp4").exists()
     final_video_url = f"/media/{run_id}/final.mp4" if has_final else None
+    production = _load_production_status(run_dir)
 
     # Build segments
     segments: list[dict[str, Any]] = []
@@ -169,10 +265,22 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         ]
 
         scene_url = _scene_url(run_dir, seg_id)
-        clip_url = _clip_url(run_dir, seg_id)
+        clip_urls = _clip_urls(run_dir, seg)
         audio_url = _audio_url(run_dir, seg_id)
-        image_url = _image_url(run_dir, seg_id)
-        status = _segment_status(run_dir, seg_id, scene_url, clip_url, audio_url)
+        image_urls = _image_urls(run_dir, seg)
+        clip_url = clip_urls[0] if clip_urls else None
+        image_url = image_urls[0] if image_urls else None
+        qa_segment = qa_segments.get(seg_id) if isinstance(qa_segments, dict) else None
+        storyboard = storyboard_segments.get(seg_id) or _script_storyboard(seg)
+        status = _segment_status(
+            run_dir,
+            seg,
+            scene_url,
+            image_urls,
+            clip_urls,
+            audio_url,
+            qa_segment,
+        )
 
         # Duration: prefer audio manifest, fall back to script estimate
         if seg_id in audio_manifest:
@@ -188,10 +296,15 @@ def get_run(run_id: str) -> dict[str, Any] | None:
                 "cues": cues,
                 "status": status,
                 "image_url": image_url,
+                "image_urls": image_urls,
                 "clip_url": clip_url,
+                "clip_urls": clip_urls,
                 "scene_url": scene_url,
                 "audio_url": audio_url,
                 "duration_seconds": duration_seconds,
+                "visual_count": len(_visual_stems(seg)) or (1 if scene_url else len(clip_urls)),
+                "storyboard": storyboard,
+                "qa": qa_segment,
             }
         )
 
@@ -210,5 +323,7 @@ def get_run(run_id: str) -> dict[str, Any] | None:
         "title": title,
         "final_video_url": final_video_url,
         "total_duration_seconds": total_duration,
+        "qa": qa_report or None,
+        "production": production,
         "segments": segments,
     }

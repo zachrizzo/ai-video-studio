@@ -1,12 +1,12 @@
 import { useEffect, useState, useCallback } from 'react'
-import { fetchRuns, fetchRun } from '../api'
+import { fetchRuns, fetchRun, startRunProduction } from '../api'
 import type { RunSummary, RunDetail } from '../api'
 import { SegmentCard } from './SegmentCard'
 
 interface FlowViewerProps {
   /** run_id to highlight / auto-refresh when an artifact_updated event arrives */
   artifactRefreshRunId: string | null
-  onRunIdChange: (runId: string) => void
+  onRunIdChange: (runId: string, title?: string) => void
 }
 
 function formatDuration(s: number): string {
@@ -24,6 +24,8 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
   const [loadingDetail, setLoadingDetail] = useState(false)
   const [runsError, setRunsError] = useState<string | null>(null)
   const [detailError, setDetailError] = useState<string | null>(null)
+  const [produceBusy, setProduceBusy] = useState(false)
+  const [produceError, setProduceError] = useState<string | null>(null)
 
   // ── Load run list on mount ────────────────────────────────────────────────
   useEffect(() => {
@@ -34,7 +36,7 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
         if (r.length > 0) {
           const first = r[0]
           setSelectedId(first.id)
-          onRunIdChange(first.id)
+          onRunIdChange(first.id, first.title)
         }
       })
       .catch((e: unknown) => {
@@ -52,17 +54,18 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
       .then((r) => {
         setRuns(r)
         const known = r.some((x) => x.id === artifactRefreshRunId)
+        const run = r.find((x) => x.id === artifactRefreshRunId)
         if (known && artifactRefreshRunId !== selectedId) {
           setSelectedId(artifactRefreshRunId)
-          onRunIdChange(artifactRefreshRunId)
+          onRunIdChange(artifactRefreshRunId, run?.title)
         }
       })
       .catch(() => {})
   }, [artifactRefreshRunId, selectedId, onRunIdChange])
 
   // ── Load run detail whenever selected run changes ─────────────────────────
-  const loadDetail = useCallback((runId: string) => {
-    setLoadingDetail(true)
+  const loadDetail = useCallback((runId: string, showLoading = true) => {
+    if (showLoading) setLoadingDetail(true)
     setDetailError(null)
     fetchRun(runId)
       .then(setDetail)
@@ -70,12 +73,20 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
         const msg = e instanceof Error ? e.message : String(e)
         setDetailError(msg)
       })
-      .finally(() => setLoadingDetail(false))
+      .finally(() => {
+        if (showLoading) setLoadingDetail(false)
+      })
   }, [])
 
   useEffect(() => {
     if (selectedId) loadDetail(selectedId)
   }, [selectedId, loadDetail])
+
+  useEffect(() => {
+    if (!selectedId) return
+    const run = runs.find((r) => r.id === selectedId)
+    if (run) onRunIdChange(selectedId, run.title)
+  }, [onRunIdChange, runs, selectedId])
 
   // ── Refresh when artifact_updated fires for this run ─────────────────────
   useEffect(() => {
@@ -84,16 +95,80 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
     }
   }, [artifactRefreshRunId, selectedId, loadDetail])
 
+  useEffect(() => {
+    if (!selectedId || detail?.production?.status !== 'running') return
+    const timer = window.setInterval(() => {
+      loadDetail(selectedId, false)
+      fetchRuns().then(setRuns).catch(() => {})
+    }, 3000)
+    return () => window.clearInterval(timer)
+  }, [detail?.production?.status, loadDetail, selectedId])
+
   // ── Handlers ─────────────────────────────────────────────────────────────
   function handleRunChange(e: React.ChangeEvent<HTMLSelectElement>) {
     const id = e.target.value
+    const run = runs.find((r) => r.id === id)
     setSelectedId(id)
-    onRunIdChange(id)
+    onRunIdChange(id, run?.title)
+  }
+
+  function handleProduce(mode: 'full' | 'videos' = 'full') {
+    if (!selectedId) return
+    const runId = selectedId
+    setProduceBusy(true)
+    setProduceError(null)
+    const options = mode === 'videos' ? { mode, force_video: true } : undefined
+    startRunProduction(runId, options)
+      .then((production) => {
+        setDetail((current) => (
+          current && current.id === production.run_id
+            ? { ...current, production }
+            : current
+        ))
+        loadDetail(runId, false)
+        fetchRuns().then(setRuns).catch(() => {})
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e)
+        setProduceError(msg)
+      })
+      .finally(() => setProduceBusy(false))
   }
 
   // ── Computed ──────────────────────────────────────────────────────────────
-  const doneCount = detail ? detail.segments.filter((s) => s.status === 'done').length : 0
+  const doneCount = detail
+    ? detail.segments.filter((s) => s.status === 'done' || s.status === 'approved').length
+    : 0
+  const approvedCount = detail ? detail.segments.filter((s) => s.status === 'approved').length : 0
   const totalCount = detail ? detail.segments.length : 0
+  const production = detail?.production ?? null
+  const isProducing = production?.status === 'running'
+  const productionNeedsAction = production?.status === 'failed' || production?.status === 'stalled'
+  const showProduceButton = Boolean(
+    detail && selectedId && (isProducing || productionNeedsAction || !detail.final_video_url)
+  )
+  const hasExistingImages = Boolean(
+    detail?.segments.some((s) => (
+      (s.image_urls?.length ?? 0) > 0 || Boolean(s.image_url)
+    ))
+  )
+  const showRerunVideosButton = Boolean(detail && selectedId && hasExistingImages && !isProducing)
+  const produceButtonText = isProducing
+    ? (production?.step_label || 'Producing')
+    : productionNeedsAction
+      ? 'Resume production'
+      : 'Produce video'
+  const productionText = production
+    ? production.status === 'running'
+      ? `${Math.round(production.progress)}% · ${production.step_label}`
+      : production.status === 'failed'
+        ? `failed${production.error ? `: ${production.error}` : ''}`
+          : production.status === 'stalled'
+            ? 'stalled · resume needed'
+            : production.status === 'done'
+              ? (production.step_label || 'video ready')
+              : null
+    : null
 
   return (
     <div className="flow-viewer">
@@ -123,20 +198,64 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
         {detail && (
           <span className="run-status">
             <em>{doneCount}/{totalCount}</em> segments done
+            {approvedCount > 0 && <> · <em>{approvedCount}</em> approved</>}
           </span>
         )}
 
-        {detail && detail.total_duration_seconds > 0 && (
-          <span className="run-duration">
-            {formatDuration(detail.total_duration_seconds)} total
-          </span>
+        {detail && (
+          <div className="run-production">
+            {productionText && (
+              <span className={`production-note ${production?.status ?? ''}`}>
+                {productionText}
+              </span>
+            )}
+            {produceError && (
+              <span className="production-note failed">start failed: {produceError}</span>
+            )}
+            {showProduceButton && (
+              <button
+                className="produce-btn"
+                onClick={() => handleProduce('full')}
+                disabled={produceBusy || isProducing}
+                title={isProducing ? 'Production is running' : 'Start full video production'}
+              >
+                {(produceBusy || isProducing) && <span className="spinner" />}
+                {produceButtonText}
+              </button>
+            )}
+            {showRerunVideosButton && (
+              <button
+                className="produce-btn secondary"
+                onClick={() => handleProduce('videos')}
+                disabled={produceBusy || isProducing}
+                title="Regenerate LTX clips from existing images"
+              >
+                {produceBusy && <span className="spinner" />}
+                Rerun videos
+              </button>
+            )}
+            {detail.total_duration_seconds > 0 && (
+              <span className="run-duration">
+                {formatDuration(detail.total_duration_seconds)} total
+              </span>
+            )}
+          </div>
         )}
       </div>
 
       {/* Final video */}
       {detail?.final_video_url && (
         <div className="final-video-wrap">
-          <div className="final-video-label">▶ Final Video</div>
+          <div className="final-video-label">
+            <span>▶ Final Video</span>
+            {detail.qa && (
+              <span className={`qa-summary ${detail.qa.status}`}>
+                QA {detail.qa.status}
+                {detail.qa.summary.errors > 0 && ` · ${detail.qa.summary.errors} errors`}
+                {detail.qa.summary.warnings > 0 && ` · ${detail.qa.summary.warnings} warnings`}
+              </span>
+            )}
+          </div>
           <video
             className="final-video"
             src={detail.final_video_url}

@@ -1,8 +1,8 @@
-"""True AI image-to-video via LTX-Video (diffusers + Apple MPS), headless.
+"""True AI image-to-video via LTX-2.3 (ltx-2-mlx + Apple Silicon), headless.
 
 AI video models produce short clips (~2-5s). Scene segments are much longer
-(matched to narration), so we generate one real AI clip and extend it to the
-exact target duration with a seamless boomerang loop via ffmpeg.
+(matched to narration), so we generate a real AI clip, then prefer LTX extension
+for any remaining duration before falling back to a seamless boomerang loop.
 """
 
 import subprocess
@@ -30,22 +30,7 @@ def _set_cache(models_dir: str) -> None:
         os.environ["HF_HUB_CACHE"] = str(Path(models_dir).expanduser())
 
 
-def _load_pipe(model_id: str, models_dir: str):
-    global _PIPE, _PIPE_KEY
-    key = (model_id,)
-    if _PIPE is not None and _PIPE_KEY == key:
-        return _PIPE
-    _set_cache(models_dir)
-    import torch
-    from diffusers import LTXConditionPipeline
-
-    console.print(f"[blue]Loading LTX pipeline: {model_id} (first run downloads weights)…[/blue]")
-    pipe = LTXConditionPipeline.from_pretrained(model_id, torch_dtype=torch.bfloat16)
-    pipe.to("mps")
-    pipe.vae.enable_tiling()
-    _PIPE = pipe
-    _PIPE_KEY = key
-    return pipe
+_LTX_MLX_DIR = Path("/Volumes/4TB-Z/programming/ltx-2-mlx")
 
 
 def _finalize_trim(clip: Path, output_path: Path, duration_seconds: float,
@@ -108,6 +93,72 @@ def _extend_to_duration(clip: Path, output_path: Path, duration_seconds: float,
     return {"success": True}
 
 
+def _probe_duration(path: Path) -> float | None:
+    proc = subprocess.run(
+        [
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
+            str(path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    if proc.returncode != 0:
+        return None
+    try:
+        return float(proc.stdout.strip())
+    except ValueError:
+        return None
+
+
+def _ltx_extend_clip(
+    clip: Path,
+    output_path: Path,
+    prompt: str,
+    extend_seconds: float,
+    models_dir: str,
+) -> dict:
+    """Extend an existing LTX clip using ltx-2-mlx's extend command."""
+    extend_frames = max(1, int(extend_seconds * 3))  # 24fps / 8 latent compression.
+    cmd = [
+        "uv",
+        "run",
+        "ltx-2-mlx",
+        "extend",
+        "--prompt",
+        prompt,
+        "--output",
+        str(output_path),
+        "--video",
+        str(clip),
+        "--extend-frames",
+        str(extend_frames),
+        "--direction",
+        "after",
+    ]
+    env = dict(__import__("os").environ)
+    if models_dir:
+        env["HF_HUB_CACHE"] = str(Path(models_dir).expanduser())
+    proc = subprocess.run(
+        cmd,
+        capture_output=True,
+        text=True,
+        timeout=3600,
+        cwd=str(_LTX_MLX_DIR),
+        env=env,
+    )
+    if proc.returncode != 0 or not output_path.exists():
+        tail = (proc.stderr or proc.stdout or "")[-500:]
+        return {"success": False, "error_message": f"ltx extend exited {proc.returncode}: {tail}"}
+    return {"success": True}
+
+
 def generate_ltx_clip(
     image_path: Path,
     output_path: Path,
@@ -121,6 +172,11 @@ def generate_ltx_clip(
     gen_height: int = 512,
     clip_seconds: float = 4.0,
     models_dir: str = "",
+    prefer_extend: bool = True,
+    max_frames: int = 97,
+    anchor_last_frame: bool = True,
+    cfg_scale: float = 3.0,
+    stg_scale: float = 1.0,
 ) -> dict:
     """Generate a real AI image-to-video clip, extended to duration_seconds.
 
@@ -130,60 +186,83 @@ def generate_ltx_clip(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Set the cache location BEFORE any diffusers/hf import below.
     _set_cache(models_dir)
 
     try:
-        import torch
-        from diffusers.utils import export_to_video, load_image
-        from diffusers.pipelines.ltx.pipeline_ltx_condition import LTXVideoCondition
-
-        pipe = _load_pipe(model_id, models_dir)
+        gen_fps = 24
+        max_model_frames = _round_to(max(int(max_frames) - 1, 8), 8) + 1
+        want = max(int(duration_seconds * gen_fps), int(clip_seconds * gen_fps))
+        num_frames = min(_round_to(want, 8) + 1, max_model_frames)
+        covers = (num_frames / gen_fps) >= duration_seconds - 0.05
 
         gw = _round_to(gen_width, 32)
         gh = _round_to(gen_height, 32)
-        gen_fps = 24
-        # Generate enough frames to cover the whole target duration when feasible
-        # (continuous motion). Cap to stay stable on MPS; beyond it we loop.
-        MAX_FRAMES = 161  # ~6.7s at 24fps
-        want = max(int(duration_seconds * gen_fps), int(clip_seconds * gen_fps))
-        num_frames = min(_round_to(want, 8) + 1, MAX_FRAMES)
-        covers = (num_frames / gen_fps) >= duration_seconds - 0.05
 
-        console.print(f"[blue]LTX i2v: {image_path.stem} {gw}x{gh} {num_frames}f {steps} steps"
-                      f" ({'direct' if covers else 'loop'})[/blue]")
-        image = load_image(str(image_path))
-        # Image conditioning on the first frame; strength<1.0 frees the model to
-        # add motion instead of freezing on the still.
-        condition = LTXVideoCondition(image=image, frame_index=0, strength=1.0)
-        motion_prompt = (prompt + ", dynamic motion, cinematic").strip(", ")
-        negative = "static, frozen, still image, no motion, worst quality, inconsistent motion, blurry, jittery, distorted"
-        common = dict(
-            conditions=[condition], prompt=motion_prompt, negative_prompt=negative,
-            width=gw, height=gh, num_frames=num_frames,
-            decode_timestep=0.05, decode_noise_scale=0.025, image_cond_noise_scale=0.0,
-            generator=torch.Generator(device="cpu").manual_seed(0),
+        motion_prompt = prompt.strip() or (
+            "Animate the reference image with natural subject motion while preserving "
+            "identity, style, and composition."
         )
-        if "distilled" in model_id:
-            # Distilled: guidance-distilled (guidance 1.0) with the documented
-            # custom timesteps; keeps the clip stable + moving.
-            result = pipe(
-                **common, guidance_scale=1.0, guidance_rescale=0.7,
-                timesteps=[1000, 993, 987, 981, 975, 909, 725, 0.03],
-            )
-        else:
-            result = pipe(
-                **common, guidance_scale=5.0, guidance_rescale=0.7,
-                num_inference_steps=steps,
-            )
-        frames = result.frames[0]
+        anchor_count = 1
+        if anchor_last_frame and num_frames > 1:
+            anchor_count += 1
+        console.print(
+            f"[blue]LTX-2.3 MLX i2v: {image_path.stem} {gw}x{gh} {num_frames}f "
+            f"({anchor_count} image anchors, {'direct' if covers else 'loop/extend'})[/blue]"
+        )
 
         with tempfile.TemporaryDirectory() as td:
             short = Path(td) / "ltx_short.mp4"
-            export_to_video(frames, str(short), fps=gen_fps)
-            # Continuous motion when the clip covers the duration; otherwise loop.
+
+            image_args = ["--image", str(image_path), "0", "1.0"]
+            if anchor_last_frame and num_frames > 1:
+                image_args.extend(["--image", str(image_path), str(num_frames - 1), "0.85"])
+
+            # Use ltx-2-mlx CLI for native Apple Silicon inference
+            cmd = [
+                "uv", "run", "ltx-2-mlx", "generate",
+                "--prompt", motion_prompt,
+                "--output", str(short),
+                *image_args,
+                "--width", str(min(gw, 704)),
+                "--height", str(min(gh, 480)),
+                "--frames", str(num_frames),
+                "--frame-rate", str(gen_fps),
+                "--steps", str(steps),
+                "--cfg-scale", str(cfg_scale),
+                "--stg-scale", str(stg_scale),
+                "--two-stage",
+            ]
+
+            env = dict(__import__("os").environ)
+            if models_dir:
+                env["HF_HUB_CACHE"] = str(Path(models_dir).expanduser())
+
+            console.print("[blue]  Running ltx-2-mlx generate…[/blue]")
+            proc = subprocess.run(
+                cmd, capture_output=True, text=True, timeout=3600,
+                cwd=str(_LTX_MLX_DIR), env=env,
+            )
+
+            if proc.returncode != 0 or not short.exists():
+                tail = (proc.stderr or proc.stdout or "")[-500:]
+                return {"success": False, "video_path": str(output_path),
+                        "duration": None, "error_message": f"ltx-2-mlx exited {proc.returncode}: {tail}"}
+
             if covers:
                 ext = _finalize_trim(short, output_path, duration_seconds, resolution, fps)
+            elif prefer_extend:
+                extended = Path(td) / "ltx_extended.mp4"
+                short_duration = _probe_duration(short) or (num_frames / gen_fps)
+                extend_seconds = max(duration_seconds - short_duration, 0.5)
+                console.print(f"[blue]  Extending LTX motion by {extend_seconds:.1f}s…[/blue]")
+                ext = _ltx_extend_clip(short, extended, motion_prompt, extend_seconds, models_dir)
+                if ext["success"]:
+                    ext = _finalize_trim(extended, output_path, duration_seconds, resolution, fps)
+                else:
+                    console.print(
+                        f"[yellow]  LTX extend failed ({ext['error_message']}); loop fallback[/yellow]"
+                    )
+                    ext = _extend_to_duration(short, output_path, duration_seconds, resolution, fps)
             else:
                 ext = _extend_to_duration(short, output_path, duration_seconds, resolution, fps)
             if not ext["success"]:
@@ -196,6 +275,9 @@ def generate_ltx_clip(
         return {"success": True, "video_path": str(output_path), "duration": actual,
                 "error_message": None}
 
+    except subprocess.TimeoutExpired:
+        return {"success": False, "video_path": str(output_path), "duration": None,
+                "error_message": "ltx-2-mlx timed out after 3600s"}
     except Exception as e:  # noqa: BLE001
         return {"success": False, "video_path": str(output_path), "duration": None,
                 "error_message": f"{type(e).__name__}: {e}"}

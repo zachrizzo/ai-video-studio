@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 from rich.console import Console
 
+from src.visuals.beats import beat_clip_path, segment_visual_beats
+
 console = Console()
 
 
@@ -27,6 +29,25 @@ def resolve_segment_video(run_dir: Path, segment_id: str) -> Path | None:
     if fallback.exists():
         return fallback
     return None
+
+
+def resolve_segment_videos(run_dir: Path, segment) -> list[Path]:
+    """Return all video files that should represent a script segment."""
+    run_dir = Path(run_dir)
+    segment_id = getattr(segment, "segment_id", "")
+
+    if getattr(segment, "visual_type", None) == "scene":
+        beats = segment_visual_beats(segment)
+        if beats:
+            paths = [beat_clip_path(run_dir, beat) for beat in beats]
+            if all(path.exists() for path in paths):
+                return paths
+            existing = [path for path in paths if path.exists()]
+            if existing:
+                return existing
+
+    single = resolve_segment_video(run_dir, segment_id)
+    return [single] if single else []
 
 
 class VideoCompositor:
@@ -140,6 +161,7 @@ class VideoCompositor:
             "-i", str(video_path),
             "-i", str(audio_path),
             "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+            "-af", "loudnorm=I=-16:LRA=11:TP=-1.5",
             "-c:a", "aac", "-b:a", "384k", "-ar", "48000",
             "-shortest",
             "-movflags", "+faststart",

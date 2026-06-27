@@ -13,7 +13,14 @@ photos, AI motion clips, and a final composite — all running on your own machi
 - **Hybrid visuals:**
   - **Diagram segments** → animated HTML/Manim (maps, timelines, stat reveals).
   - **Scene segments** → a generated still (**FLUX** via `mflux`) turned into real
-    **AI motion** (**LTX-Video** via `diffusers`, Apple MPS) or a fast Ken Burns clip.
+    **AI motion** with **LTX-2.3** (`ltx-2-mlx`, Apple Silicon), with Ken Burns kept
+    as fallback.
+  - Longer scene segments can define multiple `visual_beats`, producing several
+    ordered stills/clips inside one narrated section so the final cut changes shots
+    every few seconds.
+- **Storyboard-first planning:** `storyboard.json` records the intended shot type,
+  composition, action, camera motion, continuity notes, and duration for each visual
+  beat before generation starts.
 - **Voice** via ElevenLabs (or silent tracks for testing).
 - **Word-synced compositing** with FFmpeg into a YouTube-ready MP4.
 - **Runs locally** on Apple Silicon; large model weights cache to a configurable dir
@@ -58,17 +65,27 @@ Then open the app and ask it to make a video.
 ```bash
 uv run python -m src.pipeline setup /tmp/video-runs
 uv run python -m src.pipeline silence  <run_dir>/script.json <run_dir>/audio
+uv run python -m src.pipeline storyboard <run_dir>/script.json <run_dir>
 uv run python -m src.pipeline imagegen <run_dir>/script.json <run_dir>
 uv run python -m src.pipeline videogen <run_dir>/script.json <run_dir>
+uv run python -m src.pipeline manifest <run_dir>/script.json <run_dir>
 uv run python -m src.pipeline composite <run_dir>/composite_manifest.json output/video.mp4
+uv run python -m src.pipeline qa <run_dir>
 ```
+
+The QA step writes `<run_dir>/qa_report.json` and fails on release blockers such as
+missing artifacts, large TTS duration drift, bad final loudness, and high-risk visual
+prompts that need review.
 
 ## Models
 
 - **Images:** FLUX.1-schnell (Apache-2.0, commercial-safe) via `mflux`. FLUX is gated on
   HuggingFace — run `hf auth login` and accept the model license once.
-- **AI video:** LTX-Video via `diffusers` (`PTV_VIDEO_PROVIDER=ltx`), with a Ken Burns
-  fallback (`kenburns`). Weights cache to `PTV_MODELS_DIR`.
+- **AI video:** LTX-2.3 via `ltx-2-mlx` (`PTV_VIDEO_PROVIDER=ltx`), with a Ken Burns
+  fallback (`kenburns`). Each storyboard beat's `action` and `camera_motion` are
+  converted into an LTX motion prompt; when a clip is shorter than the beat, the
+  pipeline tries LTX extension before falling back to a loop. Weights cache to
+  `PTV_MODELS_DIR`.
 
 ## Notes
 

@@ -4,7 +4,10 @@ import type { Segment, SegmentStatus } from '../api'
 // ── Status Badge ─────────────────────────────────────────────────────────────
 
 const STATUS_LABELS: Record<SegmentStatus, string> = {
+  approved: 'approved',
   done: 'done',
+  needs_review: 'review',
+  qa_failed: 'qa failed',
   pending: 'pending',
   generating: 'rendering',
   failed: 'failed',
@@ -78,9 +81,15 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
     scene_url,
     audio_url,
     duration_seconds,
+    visual_count,
+    storyboard = [],
+    qa,
   } = segment
 
-  const videoSrc = clip_url || scene_url || null
+  const imageUrls = segment.image_urls?.length ? segment.image_urls : image_url ? [image_url] : []
+  const clipUrls = segment.clip_urls?.length ? segment.clip_urls : clip_url ? [clip_url] : []
+  const videoSrc = clipUrls[0] || scene_url || null
+  const beatCount = visual_count || Math.max(imageUrls.length, clipUrls.length)
 
   return (
     <div className="segment-card">
@@ -91,6 +100,9 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
         <StatusBadge status={status} />
         {duration_seconds > 0 && (
           <span className="segment-duration">{formatDuration(duration_seconds)}</span>
+        )}
+        {beatCount > 1 && (
+          <span className="segment-beat-count">{beatCount} visuals</span>
         )}
       </div>
 
@@ -110,20 +122,63 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
               ))}
             </div>
           )}
+          {storyboard.length > 0 && (
+            <div className="storyboard-list">
+              <span className="storyboard-label">Storyboard</span>
+              {storyboard.slice(0, 4).map((frame, i) => (
+                <div className="storyboard-frame" key={frame.frame_id || `${frame.beat_id}-${i}`}>
+                  <div className="storyboard-frame-head">
+                    <span className="storyboard-beat">{frame.beat_id || `b${zeroPad(i + 1)}`}</span>
+                    {frame.shot_type && <span className="storyboard-shot">{frame.shot_type}</span>}
+                    {frame.duration_seconds && (
+                      <span className="storyboard-time">{formatDuration(frame.duration_seconds)}</span>
+                    )}
+                  </div>
+                  <p className="storyboard-desc">
+                    {frame.description || frame.composition || frame.action || 'planned shot'}
+                  </p>
+                  {(frame.camera_motion || frame.transition) && (
+                    <div className="storyboard-meta">
+                      {[frame.camera_motion, frame.transition].filter(Boolean).join(' · ')}
+                    </div>
+                  )}
+                </div>
+              ))}
+              {storyboard.length > 4 && (
+                <div className="storyboard-more">+{storyboard.length - 4} more frames</div>
+              )}
+            </div>
+          )}
         </div>
 
         {/* Col 2: Image */}
         <div className="seg-col">
           <span className="seg-col-label">Image</span>
-          {image_url ? (
+          {imageUrls[0] ? (
             <img
               className="seg-image"
-              src={image_url}
+              src={imageUrls[0]}
               alt={`Frame for ${section_title}`}
               loading="lazy"
             />
           ) : (
             <div className="media-placeholder">no image yet</div>
+          )}
+          {imageUrls.length > 1 && (
+            <div className="beat-strip" aria-label={`${imageUrls.length} visual beats`}>
+              {imageUrls.slice(0, 5).map((url, i) => (
+                <img
+                  className="beat-thumb"
+                  src={url}
+                  alt={`${section_title} visual ${i + 1}`}
+                  loading="lazy"
+                  key={url}
+                />
+              ))}
+              {imageUrls.length > 5 && (
+                <span className="beat-more">+{imageUrls.length - 5}</span>
+              )}
+            </div>
           )}
         </div>
 
@@ -141,7 +196,26 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
           ) : (
             <div className="media-placeholder">no clip yet</div>
           )}
+          {clipUrls.length > 1 && (
+            <div className="beat-progress">
+              {clipUrls.length} rendered clips
+            </div>
+          )}
           {audio_url && <AudioButton src={audio_url} />}
+          {qa && qa.checks.length > 0 && (
+            <div className="qa-issues">
+              <span className="qa-issues-label">QA</span>
+              {qa.checks.slice(0, 3).map((check, i) => (
+                <div className={`qa-issue ${check.severity}`} key={`${check.id}-${i}`}>
+                  <span className="qa-issue-severity">{check.severity}</span>
+                  <span className="qa-issue-message">{check.message}</span>
+                </div>
+              ))}
+              {qa.checks.length > 3 && (
+                <div className="qa-issue more">+{qa.checks.length - 3} more</div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>

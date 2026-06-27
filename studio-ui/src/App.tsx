@@ -1,6 +1,10 @@
 import { useCallback, useState } from 'react'
 import { ChatPanel } from './components/ChatPanel'
 import { FlowViewer } from './components/FlowViewer'
+import { GeneratePanel } from './components/GeneratePanel'
+import { PresetBar } from './components/PresetBar'
+
+type Tab = 'story' | 'generate'
 
 function LogoIcon() {
   return (
@@ -11,15 +15,21 @@ function LogoIcon() {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<Tab>('story')
   const [currentRunId, setCurrentRunId] = useState<string | null>(null)
-  // Bumped whenever an artifact_updated event arrives, so FlowViewer refreshes.
+  const [currentRunTitle, setCurrentRunTitle] = useState<string | null>(null)
   const [artifactRefreshRunId, setArtifactRefreshRunId] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
+  const [activePreset, setActivePreset] = useState<any>(null)
 
   const handleArtifactUpdated = useCallback((runId: string) => {
-    // Force a refresh even if the same run id fires twice in a row.
     setArtifactRefreshRunId(null)
     requestAnimationFrame(() => setArtifactRefreshRunId(runId))
+  }, [])
+
+  const handleRunChange = useCallback((runId: string, title?: string) => {
+    setCurrentRunId(runId)
+    setCurrentRunTitle(title || null)
   }, [])
 
   return (
@@ -30,6 +40,21 @@ export default function App() {
           <span className="topbar-title">Video Studio</span>
         </div>
         <span className="topbar-sep" />
+        <div className="topbar-tabs">
+          <button
+            className={`topbar-tab ${activeTab === 'story' ? 'active' : ''}`}
+            onClick={() => setActiveTab('story')}
+          >
+            Story
+          </button>
+          <button
+            className={`topbar-tab ${activeTab === 'generate' ? 'active' : ''}`}
+            onClick={() => setActiveTab('generate')}
+          >
+            Generate
+          </button>
+        </div>
+        <span className="topbar-sep" />
         <span className={`topbar-status ${connected ? 'connected' : 'disconnected'}`}>
           {connected ? '● Claude Code connected' : '○ connecting…'}
         </span>
@@ -37,17 +62,23 @@ export default function App() {
         <span className="topbar-badge">local · M5 Pro</span>
       </div>
 
-      <div className="panels">
-        <ChatPanel
-          currentRunId={currentRunId}
-          onArtifactUpdated={handleArtifactUpdated}
-          onConnectionChange={setConnected}
-        />
-        <FlowViewer
-          artifactRefreshRunId={artifactRefreshRunId}
-          onRunIdChange={setCurrentRunId}
-        />
+      <div style={{ display: activeTab === 'story' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+        <PresetBar onPresetChange={setActivePreset} />
+        <div className="panels">
+          <ChatPanel
+            currentRunId={currentRunId}
+            currentRunTitle={currentRunTitle}
+            onArtifactUpdated={handleArtifactUpdated}
+            onConnectionChange={setConnected}
+            activePreset={activePreset}
+          />
+          <FlowViewer
+            artifactRefreshRunId={artifactRefreshRunId}
+            onRunIdChange={handleRunChange}
+          />
+        </div>
       </div>
+      <GeneratePanel style={{ display: activeTab === 'generate' ? 'flex' : 'none' }} />
     </div>
   )
 }
