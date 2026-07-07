@@ -69,6 +69,7 @@ export interface WsOutboundMessage {
     video_provider: string
     style_pack?: string | null
     default_visual_engine?: string | null
+  sfx_style?: string | null
   } | null
 }
 

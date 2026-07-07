@@ -57,6 +57,28 @@ DEFAULT_PRESETS = {
         "narration_style": "Calm, thoughtful documentary narrator. Measured pacing with deliberate pauses. Curious and precise, like a nature documentary about a mind.",
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
+        "sfx_style": (
+            "Subtle procedural sfx under narration: ambience (ocean_waves, wind_howl, "
+            "fire_crackle, war_drums) at_frac 0 at -16..-20 dB; hits (cannon_boom, "
+            "musket_volley, bell_toll) pinned at_word at -8..-12 dB."
+        ),
+    },
+    "historical_epic": {
+        "name": "Historical Epic",
+        "description": "Archival collage documentary for history — battles, fleets, empires — with period sound effects",
+        "style_prompt": "19th century oil painting, muted archival palette, soft natural light, aged canvas texture, cream and terracotta tones, dramatic historical scene",
+        "video_length_minutes": 6,
+        "voice_speaker": "eric",
+        "voice_language": "english",
+        "video_provider": "ltx",
+        "narration_style": "Grave, cinematic documentary narrator. Long deliberate pauses. History told like a slow-burning epic — intimate, ominous, humane.",
+        "style_pack": "anthropic_docu",
+        "default_visual_engine": "collage",
+        "sfx_style": (
+            "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "
+            "(-8..-12 dB), war_drums/ocean_waves/fire_crackle/wind_howl/bell_toll as "
+            "at_frac 0 ambience (-16..-20 dB). Most segments should carry at least one cue."
+        ),
     },
     "dark_horror": {
         "name": "Dark & Horror",

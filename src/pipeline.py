@@ -808,6 +808,16 @@ def cmd_align(script_json: str, run_dir: str):
     run_align(Path(script_json), Path(run_dir))
 
 
+def cmd_sfx(script_json: str, run_dir: str):
+    """Mix procedural sound effects under segment narration (after align).
+
+    Exits 0 printing {"skipped": true} when no segment declares sfx.
+    """
+    from .audio.sfx import run_sfx
+
+    run_sfx(Path(script_json), Path(run_dir))
+
+
 def cmd_assets(script_json: str, run_dir: str, segment_ids: str = ""):
     """Generate CollageSpec assets (FLUX + optional rembg cutouts).
 
@@ -842,6 +852,7 @@ COMMANDS = {
     "qa": cmd_qa,
     "setup": cmd_setup,
     "align": cmd_align,
+    "sfx": cmd_sfx,
     "assets": cmd_assets,
     "collage": cmd_collage,
 }

@@ -13,6 +13,7 @@ interface Preset {
   narration_style: string
   style_pack?: string | null
   default_visual_engine?: string | null
+  sfx_style?: string | null
 }
 
 interface StylePack {

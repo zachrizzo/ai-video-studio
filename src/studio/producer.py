@@ -229,6 +229,7 @@ def _pipeline_steps(
     imagegen = ("imagegen", "Generating storyboard images", imagegen_args)
     videogen = ("videogen", "Animating storyboard beats", videogen_args)
     align = ("align", "Aligning narration words", base + ["align", str(script_path), str(run_dir)])
+    sfx = ("sfx", "Mixing sound effects", base + ["sfx", str(script_path), str(run_dir)])
     assets = ("assets", "Generating collage assets", assets_args)
     collage = ("collage", "Rendering collage scenes", collage_args)
     manifest = ("manifest", "Building final manifest", base + ["manifest", str(script_path), str(run_dir)])
@@ -241,6 +242,7 @@ def _pipeline_steps(
             synthesize,
             update_storyboard,
             align,
+            sfx,
             imagegen,
             assets,
             videogen,

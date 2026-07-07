@@ -25,6 +25,24 @@ class AnimationCue(BaseModel):
     math_content: str | None = None  # LaTeX if applicable
 
 
+class SfxCue(BaseModel):
+    """A sound effect mixed under a segment's narration.
+
+    Timing works like the collage TimeRef: exactly one of at / at_frac /
+    at_word (at_word needs `align` to have run). Sounds come from the
+    procedural library in src/audio/sfx.py (cannon_boom, musket_volley,
+    war_drums, ocean_waves, fire_crackle, wind_howl, bell_toll, ...).
+    """
+
+    sound: str
+    at: float | None = None
+    at_frac: float | None = None
+    at_word: str | None = None
+    occurrence: int = 1
+    offset: float = 0.0
+    gain_db: float = -12.0
+
+
 class VisualBeat(BaseModel):
     beat_id: str | None = None
     description: str | None = None
@@ -68,6 +86,9 @@ class ScriptSegment(BaseModel):
     # pipeline creates images/clips named {segment_id}_b01, {segment_id}_b02...
     # and allocates the segment narration duration across them.
     visual_beats: list[VisualBeat] = []
+    # Optional sound effects mixed under this segment's narration by the
+    # `sfx` pipeline command (after synthesize + align).
+    sfx: list[SfxCue] = []
 
 
 class VideoScript(BaseModel):

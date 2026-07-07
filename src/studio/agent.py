@@ -95,12 +95,24 @@ real media locally — never tell the user you have no video/image model. Availa
   without it, and there is no estimated fallback. whisper must be installed (the
   `align` command errors and exits non-zero if the whisper CLI is unavailable).
   Command order for collage runs: setup → write script.json (+ `style_pack` field) →
-  storyboard → synthesize → align → write collage specs → assets → collage → manifest →
-  composite → qa. Documentary recipe: metaphor cold-open (parallax layers + labels) →
+  storyboard → synthesize → align → sfx → write collage specs → assets → collage →
+  manifest → composite → qa.
+- SOUND EFFECTS: segments may declare `sfx` cues that get mixed under the narration:
+  `"sfx": [{"sound": "cannon_boom", "at_word": "cannon", "gain_db": -10}]`.
+  Sounds are procedurally synthesized (no downloads): cannon_boom, cannon_distant,
+  musket_volley, war_drums, ocean_waves, fire_crackle, wind_howl, bell_toll.
+  Timing = exactly one of at / at_frac / at_word (+ optional offset); at_word needs
+  `align` to have run first. Keep gains subtle (-18..-8 dB) so narration stays clear.
+  Ambience (ocean_waves, wind_howl, fire_crackle, war_drums) works at_frac 0-0.1;
+  hits (cannon_boom, musket_volley, bell_toll) land best pinned at_word.
+  Run `uv run python -m src.pipeline sfx <script.json> <run_dir>` after align
+  (idempotent; exits 0 "skipped" when no segment declares sfx).
+  Documentary recipe: metaphor cold-open (parallax layers + labels) →
   technical viz (nodegraph / mask reveal) → split-screen experiment (typewriter) →
   philosophical outro. Keep every shot ≥2.5s with a calm camera (max scale ~1.15).
   Commands:
     `uv run python -m src.pipeline align <script.json> <run_dir>`
+    `uv run python -m src.pipeline sfx <script.json> <run_dir>`
     `uv run python -m src.pipeline assets <script.json> <run_dir> [ids]`
     `uv run python -m src.pipeline collage <script.json> <run_dir> [ids]`
 
@@ -359,6 +371,12 @@ async def handle_ws(websocket: WebSocket) -> None:
                     collage_lines += (
                         "Default segments to visual_engine 'collage' unless a segment "
                         "clearly needs manim math or an AI-motion scene.\n"
+                    )
+                sfx_style = preset.get("sfx_style")
+                if sfx_style:
+                    collage_lines += (
+                        f"- Sound effects: {sfx_style} Declare `sfx` cues on segments in "
+                        f"script.json and run the `sfx` command after align.\n"
                     )
                 preset_ctx = (
                     f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
