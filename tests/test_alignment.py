@@ -127,7 +127,7 @@ def test_normalize_word() -> None:
 
 
 def _ffmpeg(args: list[str]) -> None:
-    subprocess.run(["/usr/bin/ffmpeg", "-y", *args], check=True, capture_output=True, text=True)
+    subprocess.run(["ffmpeg", "-y", *args], check=True, capture_output=True, text=True)
 
 
 def _collage_run(tmp_path: Path) -> tuple[Path, Path]:
