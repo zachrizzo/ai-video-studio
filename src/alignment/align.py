@@ -127,8 +127,28 @@ def _whisper_align(
         return words, None
 
 
+def _sfx_at_word_segment_ids(script_path: Path) -> list[str]:
+    """Segments whose sfx cues use at_word — they need word alignment too."""
+    if not script_path.exists():
+        return []
+    try:
+        script = json.loads(script_path.read_text())
+    except json.JSONDecodeError:
+        return []
+    ids: list[str] = []
+    for seg in script.get("segments", []):
+        if any(c.get("at_word") for c in seg.get("sfx", []) or []):
+            seg_id = seg.get("segment_id", "")
+            if seg_id:
+                ids.append(seg_id)
+    return ids
+
+
 def run_align(script_path: Path, run_dir: Path) -> None:
     segment_ids = collage_segment_ids(script_path, run_dir)
+    for seg_id in _sfx_at_word_segment_ids(script_path):
+        if seg_id not in segment_ids:
+            segment_ids.append(seg_id)
     if not segment_ids:
         print_skipped("no collage segments in this run")
         return

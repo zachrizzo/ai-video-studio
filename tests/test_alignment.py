@@ -230,6 +230,25 @@ def test_run_align_missing_whisper_exits_nonzero(tmp_path: Path, monkeypatch) ->
     assert not (run_dir / "audio" / "alignment.json").exists()
 
 
+def test_run_align_includes_sfx_at_word_scene_segments(tmp_path: Path, monkeypatch) -> None:
+    """A scene (non-collage) segment with an at_word sfx cue must get aligned too."""
+    script_path, run_dir = _collage_run(tmp_path)
+    script = json.loads(script_path.read_text())
+    script["segments"][0]["visual_engine"] = "html"
+    script["segments"][0]["visual_type"] = "scene"
+    script["segments"][0]["sfx"] = [{"sound": "cannon_boom", "at_word": "valley"}]
+    script_path.write_text(json.dumps(script))
+
+    fake = _fake_whisper(tmp_path)
+    monkeypatch.setenv("PTV_ALIGN_COMMAND", str(fake))
+
+    run_align(script_path, run_dir)
+
+    data = json.loads((run_dir / "audio" / "alignment.json").read_text())
+    assert "seg01" in data
+    assert data["seg01"]["source"] == "whisper"
+
+
 def test_run_align_no_collage_work_prints_skipped(tmp_path: Path, capsys) -> None:
     run_dir = tmp_path / "run_plain"
     run_dir.mkdir()
