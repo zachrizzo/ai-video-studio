@@ -189,25 +189,32 @@ def split_beat_durations(total_seconds: float, beats: list[SegmentVisualBeat]) -
     total = max(float(total_seconds or 0), 0.1)
     durations = [beat.duration_seconds for beat in beats]
     explicit_total = sum(duration or 0 for duration in durations)
+    missing_indexes = [i for i, duration in enumerate(durations) if not duration]
 
-    if explicit_total >= total and explicit_total > 0:
-        allocated = [total * ((duration or 0) / explicit_total) for duration in durations]
-    elif explicit_total > 0:
+    if explicit_total > 0:
         allocated = [duration or 0 for duration in durations]
-        remaining = max(total - explicit_total, 0)
-        missing_indexes = [i for i, duration in enumerate(durations) if not duration]
-        weight_total = sum(max(beats[i].weight, 0.1) for i in missing_indexes) or 1
-        for i in missing_indexes:
-            allocated[i] = remaining * (max(beats[i].weight, 0.1) / weight_total)
+        if missing_indexes:
+            remaining = total - explicit_total
+            if remaining > 0:
+                weight_total = sum(max(beats[i].weight, 0.1) for i in missing_indexes) or 1
+                for i in missing_indexes:
+                    allocated[i] = remaining * (max(beats[i].weight, 0.1) / weight_total)
+            else:
+                avg_explicit = explicit_total / max(len(beats) - len(missing_indexes), 1)
+                for i in missing_indexes:
+                    allocated[i] = avg_explicit * max(beats[i].weight, 0.1)
     else:
         weight_total = sum(max(beat.weight, 0.1) for beat in beats) or 1
         allocated = [total * (max(beat.weight, 0.1) / weight_total) for beat in beats]
 
-    if len(allocated) > 1:
-        allocated[-1] = max(0.1, total - sum(allocated[:-1]))
-    else:
+    if len(allocated) == 1:
         allocated[0] = total
-    return allocated
+        return allocated
+
+    allocated_total = sum(allocated)
+    if allocated_total > 0 and abs(allocated_total - total) > 1e-9:
+        allocated = [value * (total / allocated_total) for value in allocated]
+    return [max(0.1, value) for value in allocated]
 
 
 def ltx_motion_prompt(beat: SegmentVisualBeat) -> str:

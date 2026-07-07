@@ -14,6 +14,7 @@ Run via:
 from __future__ import annotations
 
 import logging
+import os
 import uuid
 from pathlib import Path
 
@@ -61,8 +62,9 @@ app.add_middleware(
 
 
 # ---------------------------------------------------------------------------
-# Mount static media (must happen after app creation; path is resolved at
-# request time so that STUDIO_RUNS_DIR env var changes are honoured).
+# Mount static media (must happen after app creation). The directory is
+# resolved once here from STUDIO_RUNS_DIR at import/startup time; changing
+# the env var afterward requires a server restart to take effect.
 # ---------------------------------------------------------------------------
 
 def _mount_media() -> None:
@@ -109,6 +111,8 @@ ALLOWED_EXTENSIONS = {
     # audio
     ".mp3", ".wav", ".m4a", ".aac",
 }
+
+MAX_UPLOAD_SIZE = 2 * 1024 * 1024 * 1024  # 2 GB
 
 
 # ---------------------------------------------------------------------------
@@ -186,6 +190,13 @@ class PresetSaveRequest(BaseModel):
     voice_language: str = "english"
     video_provider: str = "kenburns"
     narration_style: str = ""
+    # Optional fields that api_save_preset persists via req.model_dump(); declare
+    # them so custom presets stop silently dropping these on save.
+    style_pack: str | None = None
+    default_visual_engine: str | None = None
+    sfx_style: str | None = None
+    tts_provider: str | None = None
+    voicebox_profile: str | None = None
 
 class TTSRequest(BaseModel):
     text: str
@@ -194,11 +205,16 @@ class TTSRequest(BaseModel):
     instruct: str | None = None
     ref_audio: str | None = None
     model_size: str = "0.6B"
+    # provider=None uses the configured default (PTV_VOICE_PROVIDER); "voicebox"
+    # routes through the Voicebox app, "qwen"/anything else uses Qwen3-TTS.
+    provider: str | None = None
+    voicebox_profile: str | None = None
 
 class ProduceRunRequest(BaseModel):
     mode: str = "full"
     force_video: bool = False
     segment_ids: str = ""
+    speed: float | None = None
 
 
 # ---------------------------------------------------------------------------
@@ -357,6 +373,7 @@ async def api_start_run_production(
             mode=options.mode,
             force_video=options.force_video,
             segment_ids=options.segment_ids,
+            speed=options.speed,
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found") from None
@@ -379,8 +396,15 @@ async def api_upload(file: UploadFile) -> dict:
         raise HTTPException(status_code=400, detail=f"File type '{ext}' not allowed")
     file_id = uuid.uuid4().hex[:16]
     dest = _UPLOADS_DIR / f"{file_id}{ext}"
-    content = await file.read()
-    dest.write_bytes(content)
+    size = 0
+    with dest.open("wb") as out:
+        while chunk := await file.read(1024 * 1024):
+            size += len(chunk)
+            if size > MAX_UPLOAD_SIZE:
+                out.close()
+                dest.unlink(missing_ok=True)
+                raise HTTPException(status_code=413, detail="File too large")
+            out.write(chunk)
     return {"path": str(dest), "url": f"/uploads/{file_id}{ext}"}
 
 
@@ -502,7 +526,8 @@ async def api_tts(req: TTSRequest) -> dict:
     gen_id = start_tts(
         text=req.text, speaker=req.speaker, language=req.language,
         instruct=req.instruct, ref_audio=req.ref_audio,
-        model_size=req.model_size,
+        model_size=req.model_size, provider=req.provider,
+        voicebox_profile=req.voicebox_profile,
     )
     return {"id": gen_id}
 
@@ -567,4 +592,5 @@ async def ws_chat(websocket: WebSocket) -> None:
 if __name__ == "__main__":
     import uvicorn
 
-    uvicorn.run("src.studio.server:app", host="0.0.0.0", port=8787, reload=False)
+    host = os.environ.get("STUDIO_HOST", "127.0.0.1")
+    uvicorn.run("src.studio.server:app", host=host, port=8787, reload=False)

@@ -108,6 +108,10 @@ def _normalize_audio_file(path: Path, target_lufs: float = -16.0) -> str | None:
             return f"audio normalization failed: {(proc.stderr or proc.stdout)[-300:]}"
         shutil.move(str(tmp_path), str(path))
         return None
+    except subprocess.TimeoutExpired:
+        return "audio normalization failed: ffmpeg timed out"
+    except (OSError, subprocess.SubprocessError) as exc:
+        return f"audio normalization failed: {exc}"
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
@@ -116,8 +120,11 @@ def _normalize_audio_file(path: Path, target_lufs: float = -16.0) -> str | None:
 def cmd_synthesize(script_json: str, output_dir: str):
     """Synthesize voice audio for all segments in a script.
 
-    Uses Qwen3-TTS (local) when no ElevenLabs key is set, or when
-    voice_provider is explicitly set to 'qwen'.
+    Dispatches on config.voice_provider: "voicebox" (Voicebox app REST API,
+    no fallback — hard-fails if the app/profile is unavailable), "qwen"
+    (bundled Qwen3-TTS, local), or "elevenlabs" (cloud). As a legacy
+    convenience, an empty ElevenLabs key falls back to Qwen — but only when
+    ElevenLabs was the chosen provider; "voicebox" never silently falls back.
     """
     from .analysis.script_writer import load_script
     from .config import PipelineConfig
@@ -127,9 +134,87 @@ def cmd_synthesize(script_json: str, output_dir: str):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    use_qwen = config.voice_provider == "qwen" or not config.elevenlabs_api_key
+    provider = config.voice_provider
+    if provider == "elevenlabs" and not config.elevenlabs_api_key:
+        provider = "qwen"
 
-    if use_qwen:
+    if provider == "voicebox":
+        console.print(f"[blue]Using Voicebox ({config.voicebox_profile}) for voice synthesis[/blue]")
+        from .studio.tts_voicebox import generate_speech_voicebox, resolve_profile
+
+        # Resolve the profile ONCE, before the loop. A miss (or a down server)
+        # is a hard failure with an actionable error — no fallback provider.
+        try:
+            profile_id = resolve_profile(config.voicebox_url, config.voicebox_profile)
+        except RuntimeError as exc:
+            console.print(f"[red]Voicebox unavailable: {exc}[/red]")
+            sys.exit(1)
+
+        manifest = {}
+        for seg in script.segments:
+            audio_path = out / f"audio_{seg.segment_id}.wav"
+            console.print(f"  {seg.segment_id}: {seg.narration_text[:60]}…")
+            qa_issues: list[str] = []
+            result = {"success": False, "error": "not attempted"}
+            duration = seg.estimated_duration_seconds
+            # Qwen re-rolls a drifting take with a stricter instruction; Voicebox
+            # has no instruct knob, so re-roll the sampler seed instead. The first
+            # take is server-chosen (seed=None); the retry pins a deterministic seed.
+            first_seed = 0
+            for attempt, seed in enumerate((None, first_seed + 1), start=1):
+                qa_issues = []
+                result = generate_speech_voicebox(
+                    text=seg.narration_text,
+                    output_path=audio_path,
+                    profile=profile_id,
+                    language=config.voicebox_language,
+                    seed=seed,
+                    url=config.voicebox_url,
+                )
+                if not result["success"]:
+                    break
+
+                norm_error = _normalize_audio_file(audio_path, config.qa_target_lufs)
+                if norm_error:
+                    qa_issues.append(norm_error)
+
+                probed = _probe_media_duration(audio_path)
+                duration = probed if probed is not None else seg.estimated_duration_seconds
+                drift = _duration_drift_issue(
+                    duration,
+                    seg.estimated_duration_seconds,
+                    config,
+                )
+                if drift and attempt == 1:
+                    console.print(f"    [yellow]{drift}; retrying with a fresh Voicebox seed[/yellow]")
+                    continue
+                if drift:
+                    qa_issues.append(drift)
+                break
+
+            if result["success"]:
+                manifest[seg.segment_id] = {
+                    "audio_path": str(audio_path),
+                    "duration_seconds": duration,
+                    "qa_issues": qa_issues,
+                }
+                issue_note = " [yellow](QA issue)[/yellow]" if qa_issues else ""
+                console.print(f"    [green]-> {audio_path.name} ({duration:.1f}s)[/green]{issue_note}")
+            else:
+                console.print(f"    [red]FAILED: {result.get('error', '?')}[/red]")
+                manifest[seg.segment_id] = {
+                    "audio_path": str(audio_path),
+                    "duration_seconds": seg.estimated_duration_seconds,
+                    "qa_issues": [result.get("error", "TTS failed")],
+                }
+
+        manifest_path = out / "audio_manifest.json"
+        manifest_path.write_text(json.dumps(manifest, indent=2))
+        total = sum(v["duration_seconds"] for v in manifest.values())
+        console.print(f"[green]Synthesized {len(manifest)} segments ({total:.1f}s total) via Voicebox[/green]")
+        console.print(f"  Manifest: {manifest_path}")
+
+    elif provider == "qwen":
         console.print("[blue]Using Qwen3-TTS (local) for voice synthesis[/blue]")
         from .studio.tts import generate_speech
         manifest = {}
@@ -144,6 +229,7 @@ def cmd_synthesize(script_json: str, output_dir: str):
                 "repeat, add words, or continue after the final sentence."
             )
             for attempt, instruct in enumerate((None, retry_instruction), start=1):
+                qa_issues = []
                 result = generate_speech(
                     text=seg.narration_text,
                     output_path=audio_path,
@@ -723,12 +809,19 @@ def cmd_manifest(script_json: str, run_dir: str, output_path: str = ""):
     print(json.dumps(result))
 
 
-def cmd_composite(manifest_json: str, output_path: str):
-    """Composite video and audio segments into a final video. Audio is optional."""
+def cmd_composite(manifest_json: str, output_path: str, *args):
+    """Composite video and audio segments into a final video. Audio is optional.
+
+    Usage: composite <manifest.json> <output.mp4> [--speed <0.25-4.0>]
+    """
     from .compositing.compositor import VideoCompositor
     from .config import PipelineConfig
 
     config = PipelineConfig()
+    speed = config.video_speed
+    if "--speed" in args:
+        speed = float(args[args.index("--speed") + 1])
+
     manifest = json.loads(Path(manifest_json).read_text())
 
     video_paths = [Path(v) for v in manifest["video_paths"]]
@@ -740,6 +833,7 @@ def cmd_composite(manifest_json: str, output_path: str):
         audio_paths=audio_paths,
         output_path=Path(output_path),
         resolution=config.resolution,
+        speed=speed,
     )
 
     console.print(f"[green]Final video: {final}[/green]")

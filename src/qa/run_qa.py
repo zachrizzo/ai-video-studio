@@ -15,6 +15,9 @@ import shlex
 import shutil
 import subprocess
 import tempfile
+import urllib.error
+import urllib.request
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -206,7 +209,72 @@ def _asr_available(command: str) -> bool:
     return shutil.which(exe) is not None
 
 
+def _transcribe_voicebox(audio_path: Path, config: PipelineConfig) -> tuple[str | None, str | None]:
+    """Transcribe via the Voicebox app's POST /transcribe endpoint.
+
+    Builds a multipart/form-data body by hand (stdlib urllib only, no new deps):
+    a ``file`` part (audio/wav) plus a ``language`` field. Returns (text, None)
+    on success. An unreachable server or a non-200 response returns the same
+    (None, message) "unavailable" shape the CLI branch uses for a missing
+    whisper binary, but with an actionable message.
+    """
+    url = config.voicebox_url.rstrip("/") + "/transcribe"
+    unreachable = (
+        f"Voicebox /transcribe unreachable at {config.voicebox_url} — launch the "
+        f"Voicebox app (voicebox.sh) or set PTV_QA_ASR_PROVIDER=cli"
+    )
+
+    try:
+        audio_bytes = audio_path.read_bytes()
+    except OSError as exc:
+        return None, f"could not read audio for Voicebox transcription: {exc}"
+
+    boundary = uuid.uuid4().hex
+    body = b"".join(
+        [
+            f"--{boundary}\r\n".encode(),
+            b'Content-Disposition: form-data; name="language"\r\n\r\n',
+            f"{config.voicebox_language}\r\n".encode(),
+            f"--{boundary}\r\n".encode(),
+            (
+                f'Content-Disposition: form-data; name="file"; '
+                f'filename="{audio_path.name}"\r\n'
+            ).encode(),
+            b"Content-Type: audio/wav\r\n\r\n",
+            audio_bytes,
+            b"\r\n",
+            f"--{boundary}--\r\n".encode(),
+        ]
+    )
+
+    request = urllib.request.Request(
+        url,
+        data=body,
+        headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=900) as response:
+            if response.status != 200:
+                return None, unreachable
+            payload = response.read()
+    except (urllib.error.URLError, TimeoutError, OSError):
+        return None, unreachable
+
+    try:
+        data = json.loads(payload)
+    except json.JSONDecodeError as exc:
+        return None, f"Voicebox /transcribe returned invalid JSON: {exc}"
+    text = data.get("text")
+    if text is None:
+        return None, "Voicebox /transcribe response had no 'text' field"
+    return str(text).strip(), None
+
+
 def _transcribe(audio_path: Path, config: PipelineConfig) -> tuple[str | None, str | None]:
+    if config.qa_asr_provider == "voicebox":
+        return _transcribe_voicebox(audio_path, config)
+
     command = os.environ.get("PTV_QA_ASR_COMMAND") or config.qa_asr_command
     if not _asr_available(command):
         return None, f"ASR command not found: {command}"

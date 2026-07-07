@@ -45,7 +45,7 @@ import soundfile as sf
 from qwen_tts import Qwen3TTSModel
 
 model = Qwen3TTSModel.from_pretrained(
-    "Qwen/Qwen3-TTS-12Hz-{model_size}-Base",
+    {repr(f"Qwen/Qwen3-TTS-12Hz-{model_size}-Base")},
     device_map="mps",
     dtype=torch.float32,
 )
@@ -68,7 +68,7 @@ import soundfile as sf
 from qwen_tts import Qwen3TTSModel
 
 model = Qwen3TTSModel.from_pretrained(
-    "Qwen/Qwen3-TTS-12Hz-{model_size}-CustomVoice",
+    {repr(f"Qwen/Qwen3-TTS-12Hz-{model_size}-CustomVoice")},
     device_map="mps",
     dtype=torch.float32,
 )

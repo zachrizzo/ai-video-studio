@@ -42,7 +42,7 @@ def get_generation(gen_id: str) -> dict | None:
 
 def list_generations() -> list[dict]:
     gens = []
-    for d in sorted(_GENS_DIR.iterdir(), reverse=True):
+    for d in _GENS_DIR.iterdir():
         sf = d / "status.json"
         if sf.exists():
             try:
@@ -50,6 +50,7 @@ def list_generations() -> list[dict]:
                 gens.append(data)
             except Exception:
                 pass
+    gens.sort(key=lambda data: data.get("created_at", ""), reverse=True)
     return gens[:50]  # last 50
 
 
@@ -440,8 +441,8 @@ def _run_image_to_video(gen_id: str, image_path: str, prompt: str | None,
                         first_frame: bool | None, last_frame: bool | None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
-    saved_img = _save_upload(image_path, out_dir, "input_image")
     try:
+        saved_img = _save_upload(image_path, out_dir, "input_image")
         _write_status(gen_id, {
             "id": gen_id, "type": "image-to-video", "status": "generating",
             "prompt": prompt, "backend": backend, "created_at": time.time(),
@@ -530,9 +531,9 @@ def _run_audio_to_video(gen_id: str, audio_uri: str, image_uri: str | None,
                         backend: str = "local") -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
-    saved_audio = _save_upload(audio_uri, out_dir, "input_audio")
-    saved_image = _save_upload(image_uri, out_dir, "input_image")
     try:
+        saved_audio = _save_upload(audio_uri, out_dir, "input_audio")
+        saved_image = _save_upload(image_uri, out_dir, "input_image")
         _write_status(gen_id, {
             "id": gen_id, "type": "audio-to-video", "status": "generating",
             "prompt": prompt, "created_at": time.time(),
@@ -592,8 +593,8 @@ def _run_retake_video(gen_id: str, video_uri: str, start_time: float,
                       backend: str = "local") -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
-    saved_video = _save_upload(video_uri, out_dir, "input_video")
     try:
+        saved_video = _save_upload(video_uri, out_dir, "input_video")
         _write_status(gen_id, {
             "id": gen_id, "type": "retake", "status": "generating",
             "prompt": prompt, "created_at": time.time(),
@@ -655,8 +656,8 @@ def _run_extend_video(gen_id: str, video_uri: str, prompt: str, model: str,
                       backend: str = "local") -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
-    saved_video = _save_upload(video_uri, out_dir, "input_video")
     try:
+        saved_video = _save_upload(video_uri, out_dir, "input_video")
         _write_status(gen_id, {
             "id": gen_id, "type": "extend", "status": "generating",
             "prompt": prompt, "created_at": time.time(),
@@ -714,8 +715,8 @@ def _run_extend_video(gen_id: str, video_uri: str, prompt: str, model: str,
 def _run_video_hdr(gen_id: str, video_uri: str) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
-    _save_upload(video_uri, out_dir, "input_video")
     try:
+        _save_upload(video_uri, out_dir, "input_video")
         _write_status(gen_id, {
             "id": gen_id, "type": "video-hdr", "status": "generating",
             "created_at": time.time(),
@@ -864,28 +865,44 @@ def start_video_hdr(video_uri: str) -> str:
 
 def _run_tts(gen_id: str, text: str, speaker: str, language: str,
              instruct: str | None, ref_audio: str | None,
-             model_size: str) -> None:
+             model_size: str, provider: str | None = None,
+             voicebox_profile: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.wav"
     try:
+        cfg = PipelineConfig()
+        # provider=None means "use the configured default". Voicebox routes
+        # through the Voicebox app (no fallback); anything else uses Qwen3-TTS.
+        use_voicebox = provider == "voicebox" or (
+            provider is None and cfg.voice_provider == "voicebox"
+        )
+        engine = "Voicebox" if use_voicebox else "Qwen3-TTS"
         _write_status(gen_id, {
             "id": gen_id, "type": "text-to-speech", "status": "generating",
             "prompt": text, "created_at": time.time(),
             "output_url": None, "error": None,
-            "progress": 10, "progress_step": "Loading Qwen3-TTS model...",
+            "progress": 10, "progress_step": f"Loading {engine}...",
         })
-        from src.studio.tts import generate_speech
         _write_status(gen_id, {
             "id": gen_id, "type": "text-to-speech", "status": "generating",
             "prompt": text, "created_at": time.time(),
             "output_url": None, "error": None,
             "progress": 30, "progress_step": "Generating speech...",
         })
-        result = generate_speech(
-            text=text, output_path=out_file, speaker=speaker,
-            language=language, instruct=instruct, ref_audio=ref_audio,
-            model_size=model_size,
-        )
+        if use_voicebox:
+            from src.studio.tts_voicebox import generate_speech_voicebox
+            result = generate_speech_voicebox(
+                text=text, output_path=out_file,
+                profile=voicebox_profile or cfg.voicebox_profile,
+                language=cfg.voicebox_language, url=cfg.voicebox_url,
+            )
+        else:
+            from src.studio.tts import generate_speech
+            result = generate_speech(
+                text=text, output_path=out_file, speaker=speaker,
+                language=language, instruct=instruct, ref_audio=ref_audio,
+                model_size=model_size,
+            )
         ok = result["success"] and out_file.exists()
         _write_status(gen_id, {
             "id": gen_id, "type": "text-to-speech",
@@ -912,11 +929,14 @@ def start_tts(
     instruct: str | None = None,
     ref_audio: str | None = None,
     model_size: str = "0.6B",
+    provider: str | None = None,
+    voicebox_profile: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("text-to-speech")
     t = threading.Thread(
         target=_run_tts,
-        args=(gen_id, text, speaker, language, instruct, ref_audio, model_size),
+        args=(gen_id, text, speaker, language, instruct, ref_audio,
+              model_size, provider, voicebox_profile),
         daemon=True,
     )
     t.start()

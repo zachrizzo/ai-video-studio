@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from src.alignment.align import run_align
+from src.alignment.align import _whisper_align, run_align
 from src.collage.spec import TimeRef
 from src.collage.timing import normalize_word, resolve_time
 
@@ -197,6 +197,19 @@ JSON
     return script
 
 
+def _fake_whisper_bad_model(tmp_path: Path) -> Path:
+    """A whisper stand-in that rejects the model like argparse and exits 1."""
+    script = tmp_path / "fake_whisper_bad_model.sh"
+    script.write_text(
+        """#!/usr/bin/env bash
+echo "error: argument --model: 'bogus-model' is not one of the available models" >&2
+exit 1
+"""
+    )
+    script.chmod(0o755)
+    return script
+
+
 # ---------------------------------------------------------------------------
 # run_align
 # ---------------------------------------------------------------------------
@@ -247,6 +260,20 @@ def test_run_align_includes_sfx_at_word_scene_segments(tmp_path: Path, monkeypat
     data = json.loads((run_dir / "audio" / "alignment.json").read_text())
     assert "seg01" in data
     assert data["seg01"]["source"] == "whisper"
+
+
+def test_whisper_align_bad_model_suggests_upgrade(tmp_path: Path) -> None:
+    """A model whisper does not recognise yields an actionable upgrade hint."""
+    _, run_dir = _collage_run(tmp_path)
+    wav_path = run_dir / "audio" / "seg01.wav"
+    fake = _fake_whisper_bad_model(tmp_path)
+
+    words, error = _whisper_align(wav_path, str(fake), "bogus-model")
+
+    assert words is None
+    assert error is not None
+    assert "pip install -U openai-whisper" in error
+    assert "bogus-model" in error
 
 
 def test_run_align_no_collage_work_prints_skipped(tmp_path: Path, capsys) -> None:

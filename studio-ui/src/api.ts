@@ -208,6 +208,7 @@ export interface StartRunProductionOptions {
   mode?: 'full' | 'videos' | 'clips'
   force_video?: boolean
   segment_ids?: string
+  speed?: number
 }
 
 export async function startRunProduction(

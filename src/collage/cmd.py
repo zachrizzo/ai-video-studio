@@ -172,7 +172,12 @@ def _build_and_render(
                 f"Re-run: uv run python -m src.pipeline align {script_path} {run_dir}"
             )
         wav = _wav_path(run_dir, audio_entry)
-        if wav is not None and alignment_mtime is not None and alignment_mtime < wav.stat().st_mtime:
+        if wav is None:
+            raise ValueError(
+                f"alignment freshness cannot be verified for {seg_id} (wav audio file not found); "
+                f"this spec uses `at_word`. Re-run: uv run python -m src.pipeline align {script_path} {run_dir}"
+            )
+        if alignment_mtime is not None and alignment_mtime < wav.stat().st_mtime:
             raise ValueError(
                 f"alignment is stale for {seg_id} (audio is newer than alignment.json); "
                 f"re-run: uv run python -m src.pipeline align {script_path} {run_dir}"

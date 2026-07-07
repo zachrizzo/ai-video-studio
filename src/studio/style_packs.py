@@ -48,8 +48,10 @@ def load_style_pack(name: str, style_packs_dir: Path | None = None) -> StylePack
     list of available packs when the name is unknown."""
     root = _style_packs_dir(style_packs_dir)
     pack_dir = root / name
+    resolved_root = root.resolve()
+    resolved_pack_dir = pack_dir.resolve()
     tokens_path = pack_dir / "tokens.json"
-    if not tokens_path.exists():
+    if not resolved_pack_dir.is_relative_to(resolved_root) or not tokens_path.exists():
         available = sorted(p.parent.name for p in root.glob("*/tokens.json"))
         raise FileNotFoundError(
             f"Style pack {name!r} not found in {root} (available: {available or 'none'})"

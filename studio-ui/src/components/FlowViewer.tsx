@@ -1,6 +1,6 @@
-import { useEffect, useState, useCallback } from 'react'
+import { useEffect, useState, useCallback, useRef } from 'react'
 import { fetchRuns, fetchRun, startRunProduction } from '../api'
-import type { RunSummary, RunDetail } from '../api'
+import type { RunSummary, RunDetail, StartRunProductionOptions } from '../api'
 import { SegmentCard } from './SegmentCard'
 
 interface FlowViewerProps {
@@ -33,6 +33,11 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
   const [detailError, setDetailError] = useState<string | null>(null)
   const [produceBusy, setProduceBusy] = useState(false)
   const [produceError, setProduceError] = useState<string | null>(null)
+  const [speed, setSpeed] = useState(1)
+  const selectedIdRef = useRef<string | null>(null)
+  useEffect(() => {
+    selectedIdRef.current = selectedId
+  }, [selectedId])
 
   // ── Load run list on mount and whenever the project changes ──────────────
   useEffect(() => {
@@ -83,13 +88,15 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
     if (showLoading) setLoadingDetail(true)
     setDetailError(null)
     fetchRun(runId)
-      .then(setDetail)
+      .then((result) => {
+        if (selectedIdRef.current === runId) setDetail(result)
+      })
       .catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e)
-        setDetailError(msg)
+        if (selectedIdRef.current === runId) setDetailError(msg)
       })
       .finally(() => {
-        if (showLoading) setLoadingDetail(false)
+        if (showLoading && selectedIdRef.current === runId) setLoadingDetail(false)
       })
   }, [])
 
@@ -132,8 +139,13 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
     const runId = selectedId
     setProduceBusy(true)
     setProduceError(null)
-    const options = mode === 'videos' ? { mode, force_video: true } : undefined
-    startRunProduction(runId, options)
+    const options: StartRunProductionOptions = {}
+    if (mode === 'videos') {
+      options.mode = mode
+      options.force_video = true
+    }
+    if (speed !== 1) options.speed = speed
+    startRunProduction(runId, Object.keys(options).length > 0 ? options : undefined)
       .then((production) => {
         setDetail((current) => (
           current && current.id === production.run_id
@@ -227,6 +239,23 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
             )}
             {produceError && (
               <span className="production-note failed">start failed: {produceError}</span>
+            )}
+            {(showProduceButton || showRerunVideosButton) && !isProducing && (
+              <select
+                className="run-selector"
+                value={speed}
+                onChange={(e) => setSpeed(Number(e.target.value))}
+                disabled={produceBusy}
+                aria-label="Final video speed"
+                title="Playback speed of the final video"
+              >
+                <option value={0.75}>0.75x</option>
+                <option value={1}>1x</option>
+                <option value={1.25}>1.25x</option>
+                <option value={1.5}>1.5x</option>
+                <option value={1.75}>1.75x</option>
+                <option value={2}>2x</option>
+              </select>
             )}
             {showProduceButton && (
               <button

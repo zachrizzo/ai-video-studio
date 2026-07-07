@@ -8,6 +8,23 @@ from src.visuals.beats import beat_clip_path, segment_visual_beats
 console = Console()
 
 
+def atempo_chain(speed: float) -> str:
+    """Return a comma-separated atempo filter chain that multiplies to speed.
+
+    Each atempo factor is kept within ffmpeg's supported [0.5, 2.0] range.
+    """
+    factors: list[float] = []
+    remaining = speed
+    while remaining > 2.0:
+        factors.append(2.0)
+        remaining /= 2.0
+    while remaining < 0.5:
+        factors.append(0.5)
+        remaining /= 0.5
+    factors.append(remaining)
+    return ",".join(f"atempo={f:g}" for f in factors)
+
+
 def resolve_segment_video(run_dir: Path, segment_id: str) -> Path | None:
     """Return the best available video for a segment, in priority order:
 
@@ -43,9 +60,8 @@ def resolve_segment_videos(run_dir: Path, segment) -> list[Path]:
             paths = [beat_clip_path(run_dir, beat) for beat in beats]
             if all(path.exists() for path in paths):
                 return paths
-            existing = [path for path in paths if path.exists()]
-            if existing:
-                return existing
+            if any(path.exists() for path in paths):
+                return []
 
     single = resolve_segment_video(run_dir, segment_id)
     return [single] if single else []
@@ -60,10 +76,12 @@ class VideoCompositor:
         audio_paths: list[Path],
         output_path: Path,
         resolution: tuple[int, int] = (1920, 1080),
+        speed: float = 1.0,
     ) -> Path:
         """Merge video segments with corresponding audio into a single video.
 
         If audio_paths is empty, produces a silent video (video-only).
+        speed retimes both video and audio at the final encode (1.0 = unchanged).
         """
         output_path.parent.mkdir(parents=True, exist_ok=True)
         work_dir = output_path.parent / "compositing_temp"
@@ -86,10 +104,10 @@ class VideoCompositor:
         if audio_paths:
             concat_audio = work_dir / "concat_audio.mp3"
             self._concat_audio(audio_paths, concat_audio)
-            self._merge_av(concat_video, concat_audio, output_path)
+            self._merge_av(concat_video, concat_audio, output_path, speed)
         else:
             # Video-only: just re-encode with YouTube settings
-            self._encode_video_only(concat_video, output_path)
+            self._encode_video_only(concat_video, output_path, speed)
 
         console.print(f"[green]Final video: {output_path}[/green]")
 
@@ -155,14 +173,22 @@ class VideoCompositor:
 
         console.print(f"[dim]Concatenated {len(audio_paths)} audio segments[/dim]")
 
-    def _merge_av(self, video_path: Path, audio_path: Path, output_path: Path) -> None:
+    def _merge_av(self, video_path: Path, audio_path: Path, output_path: Path, speed: float = 1.0) -> None:
         """Merge video and audio with YouTube-optimized encoding."""
+        af = "loudnorm=I=-16:LRA=11:TP=-1.5"
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
             "-i", str(audio_path),
             "-c:v", "libx264", "-preset", "slow", "-crf", "18",
-            "-af", "loudnorm=I=-16:LRA=11:TP=-1.5",
+        ]
+        if speed != 1.0:
+            cmd += ["-filter:v", f"setpts=PTS/{speed:g}"]
+            af = f"{atempo_chain(speed)},{af}"
+        cmd += ["-af", af]
+        if speed != 1.0:
+            cmd += ["-r", "30"]
+        cmd += [
             "-c:a", "aac", "-b:a", "384k", "-ar", "48000",
             "-shortest",
             "-movflags", "+faststart",
@@ -172,12 +198,16 @@ class VideoCompositor:
         if result.returncode != 0:
             raise RuntimeError(f"AV merge failed: {result.stderr[-500:]}")
 
-    def _encode_video_only(self, video_path: Path, output_path: Path) -> None:
+    def _encode_video_only(self, video_path: Path, output_path: Path, speed: float = 1.0) -> None:
         """Re-encode video with YouTube-optimized settings, no audio."""
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
             "-c:v", "libx264", "-preset", "slow", "-crf", "18",
+        ]
+        if speed != 1.0:
+            cmd += ["-filter:v", f"setpts=PTS/{speed:g}", "-r", "30"]
+        cmd += [
             "-movflags", "+faststart",
             str(output_path),
         ]

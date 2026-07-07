@@ -14,6 +14,8 @@ interface Preset {
   style_pack?: string | null
   default_visual_engine?: string | null
   sfx_style?: string | null
+  tts_provider?: string | null
+  voicebox_profile?: string | null
 }
 
 interface StylePack {
@@ -100,7 +102,7 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
   const handleDelete = useCallback(async (id: string) => {
     await fetch(`/api/presets/${id}`, { method: 'DELETE' })
     setPresets(prev => prev.filter(p => p.id !== id))
-    if (activePreset?.id === id) setActivePreset(presets[0] || null)
+    if (activePreset?.id === id) setActivePreset(presets.filter(p => p.id !== id)[0] || null)
   }, [activePreset, presets])
 
   if (!activePreset) return null
@@ -217,6 +219,29 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
                 <option value="manim">manim</option>
               </select>
             </div>
+            <div className="preset-field">
+              <label className="preset-field-label">Voice provider</label>
+              <select
+                className="preset-select-sm"
+                value={activePreset.tts_provider || 'qwen'}
+                onChange={e => updateField('tts_provider', e.target.value)}
+              >
+                <option value="qwen">Qwen3-TTS (local)</option>
+                <option value="voicebox">Voicebox app</option>
+                <option value="elevenlabs">ElevenLabs</option>
+              </select>
+            </div>
+            {activePreset.tts_provider === 'voicebox' && (
+              <div className="preset-field">
+                <label className="preset-field-label">Voicebox profile</label>
+                <input
+                  className="preset-save-input"
+                  value={activePreset.voicebox_profile || ''}
+                  onChange={e => updateField('voicebox_profile', e.target.value)}
+                  placeholder="Narrator"
+                />
+              </div>
+            )}
           </div>
           <div className="preset-actions">
             {saving ? (

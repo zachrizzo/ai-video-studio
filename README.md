@@ -60,6 +60,27 @@ cd studio-ui && npm install && npm run dev   # http://localhost:5173
 
 Then open the app and ask it to make a video.
 
+### Voice with Voicebox (optional, recommended)
+
+The default voice is bundled Qwen3-TTS (local, no setup). For higher-quality
+narration, use the [Voicebox](https://voicebox.sh) voice studio
+([source](https://github.com/jamiepine/voicebox)):
+
+1. Install and launch Voicebox — it must stay **running** during synthesis; it listens
+   at `http://127.0.0.1:17493`. There is no silent fallback: if the app is unreachable,
+   the pipeline reports it rather than switching providers.
+2. In Voicebox, create a **profile** (a profile bundles a voice + engine). A
+   **Chatterbox Turbo** profile wins blind tests for English narration; for other
+   languages use a **Chatterbox Multilingual** profile or fall back to the Qwen voices.
+3. Name the profile `Narrator` (the default), or point at any profile with
+   `PTV_VOICEBOX_PROFILE=<profile name>`.
+4. Select the provider with `PTV_VOICE_PROVIDER=voicebox` (env or `.env`). The
+   `Anthropic Documentary` and `Historical Epic` presets already request Voicebox with
+   the `Narrator` profile.
+
+Word-level narration alignment now uses whisper **large-v3-turbo** (near large-v3
+accuracy at ~4x speed), and image generation defaults to **z-image-turbo**.
+
 ### CLI (without the UI)
 
 ```bash

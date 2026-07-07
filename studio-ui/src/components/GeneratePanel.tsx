@@ -101,7 +101,6 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
 
   // Image-to-video
   const [firstFrame, setFirstFrame] = useState<FileUpload | null>(null)
-  const [lastFrame, setLastFrame] = useState<FileUpload | null>(null)
 
   // Audio-to-video
   const [audioFile, setAudioFile] = useState<FileUpload | null>(null)
@@ -122,14 +121,6 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
 
   // HDR
   const [hdrVideo, setHdrVideo] = useState<FileUpload | null>(null)
-
-  // Load past generations
-  useEffect(() => {
-    fetch(`${API}/api/generations`)
-      .then(r => r.json())
-      .then(data => setGenerations(data.generations || []))
-      .catch(() => {})
-  }, [])
 
   // Poll generation until done/failed
   const pollGeneration = useCallback((genId: string) => {
@@ -157,6 +148,22 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     }, 1500)
     pollRef.current.set(genId, interval)
   }, [])
+
+  // Load past generations
+  useEffect(() => {
+    fetch(`${API}/api/generations`)
+      .then(r => r.json())
+      .then(data => {
+        const gens: Generation[] = data.generations || []
+        setGenerations(gens)
+        const inProgress = gens.filter(g => g.status === 'generating')
+        if (inProgress.length > 0) {
+          setGenerating(true)
+          inProgress.forEach(g => pollGeneration(g.id))
+        }
+      })
+      .catch(() => {})
+  }, [pollGeneration])
 
   // Cleanup polls
   useEffect(() => {
@@ -186,7 +193,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         const previewUrl = URL.createObjectURL(file)
         setter({ file, path: null, previewUrl, uploading: true })
         const path = await uploadFile(file)
-        setter(prev => prev ? { ...prev, path, uploading: false } : null)
+        setter(prev => (prev && prev.file === file) ? { ...prev, path, uploading: false } : prev)
       },
     [uploadFile]
   )
@@ -222,7 +229,6 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     setGenerateAudio(true)
     setCameraMotion(CAMERA_MOTIONS[0])
     setFirstFrame(null)
-    setLastFrame(null)
     setAudioFile(null)
     setImageFile(null)
     setGuidanceScale(75)
@@ -377,7 +383,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     }
   }, [
     generating, backend, apiKey, mode, prompt, model, duration, resolution, fps,
-    cameraMotion, generateAudio, firstFrame, lastFrame, audioFile, imageFile,
+    cameraMotion, generateAudio, firstFrame, audioFile, imageFile,
     guidanceScale, retakeVideo, startTime, retakeDuration, retakeMode,
     extendVideo, extendMode, extendDuration, extendContext, hdrVideo, pollGeneration,
   ])
@@ -544,15 +550,6 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
                       file={firstFrame}
                       onFile={handleFileSelect(setFirstFrame)}
                       onClear={() => setFirstFrame(null)}
-                      placeholder="Drag image or click to upload"
-                    />
-                  </FormField>
-                  <FormField label="Last Frame (optional)">
-                    <DropZone
-                      accept="image/*"
-                      file={lastFrame}
-                      onFile={handleFileSelect(setLastFrame)}
-                      onClear={() => setLastFrame(null)}
                       placeholder="Drag image or click to upload"
                     />
                   </FormField>

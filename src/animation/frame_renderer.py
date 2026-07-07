@@ -41,7 +41,12 @@ def _chromium_launch_kwargs() -> dict:
         return {}
     # Prefer the full chromium build over the headless shell; pick the highest
     # revision if several are installed.
-    candidates = sorted(glob.glob(os.path.join(root, "chromium-*", "chrome-linux", "chrome")))
+    patterns = [
+        os.path.join(root, "chromium-*", "chrome-linux", "chrome"),
+        os.path.join(root, "chromium-*", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
+        os.path.join(root, "chromium-*", "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+    ]
+    candidates = sorted(c for pattern in patterns for c in glob.glob(pattern))
     if candidates:
         return {"executable_path": candidates[-1]}
     return {}

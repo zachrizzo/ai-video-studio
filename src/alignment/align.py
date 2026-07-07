@@ -112,6 +112,15 @@ def _whisper_align(
         except Exception as exc:  # noqa: BLE001
             return None, f"whisper invocation failed: {exc}"
         if proc.returncode != 0:
+            combined = f"{proc.stderr or ''}{proc.stdout or ''}"
+            # An unsupported/misspelled model is a setup error, not a bad wav:
+            # whisper argparse rejects it ("is not one of ..."). Surface the
+            # exact upgrade command instead of a raw argparse tail.
+            if model in combined or "is not one of" in combined:
+                return None, (
+                    f"whisper CLI rejected model {model!r} — upgrade with: "
+                    f"PYENV_VERSION=3.11.13 pip install -U openai-whisper"
+                )
             tail = (proc.stderr or proc.stdout or "")[-500:]
             return None, f"whisper exited {proc.returncode}: {tail}"
         json_files = sorted(out_dir.glob("*.json"))

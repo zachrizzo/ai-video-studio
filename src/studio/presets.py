@@ -55,6 +55,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Calm, thoughtful documentary narrator. Measured pacing with deliberate pauses. Curious and precise, like a nature documentary about a mind.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Narrator",
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
         "sfx_style": (
@@ -72,6 +74,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Grave, cinematic documentary narrator. Long deliberate pauses. History told like a slow-burning epic — intimate, ominous, humane.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Narrator",
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
         "sfx_style": (

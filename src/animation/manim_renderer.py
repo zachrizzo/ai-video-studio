@@ -1,6 +1,7 @@
 import subprocess
 import re
 import os
+import shutil
 from pathlib import Path
 from rich.console import Console
 from .models import SceneSpec, RenderResult
@@ -97,8 +98,12 @@ def render_manim(
 
         # Filter out partial_movie_files — the final render is the one NOT in that dir
         final_files = [f for f in video_files if "partial_movie_files" not in str(f)]
-        video_path = final_files[0] if final_files else video_files[-1]
-        duration = _get_video_duration(video_path)
+        raw_video_path = final_files[0] if final_files else video_files[-1]
+        duration = _get_video_duration(raw_video_path)
+
+        # Copy to the canonical output path expected by the compositor/QA steps
+        video_path = work_dir / f"{spec.segment_id}_manim.mp4"
+        shutil.copy2(raw_video_path, video_path)
 
         console.print(f"[green]Rendered {scene_name}: {duration:.1f}s[/green]")
 

@@ -74,6 +74,11 @@ real media locally — never tell the user you have no video/image model. Availa
 - VOICE: `uv run python -m src.pipeline synthesize <script.json> <run_dir>/audio`
   This auto-uses Qwen3-TTS (local, no API key needed). DO NOT use 'silence' — always use 'synthesize'.
   Set env vars PTV_QWEN_TTS_SPEAKER and PTV_QWEN_TTS_LANGUAGE to control voice.
+  Higher-quality voices come from the Voicebox voice studio (open-source app,
+  voicebox.sh): it must be RUNNING at 127.0.0.1:17493 and its voices are configured
+  as named PROFILES in its UI. Select it with PTV_VOICE_PROVIDER=voicebox and
+  PTV_VOICEBOX_PROFILE=<profile name> before synthesize. There is no silent fallback —
+  if Voicebox is unreachable, tell the user to launch the app rather than switching providers.
   VISUALS for diagrams:
   write HTML/Manim scene specs and `render`. Final cut: `composite`.
   HTML diagram scenes must implement the deterministic seek contract
@@ -422,6 +427,24 @@ async def handle_ws(websocket: WebSocket) -> None:
                         f"- Sound effects: {sfx_style} Declare `sfx` cues on segments in "
                         f"script.json and run the `sfx` command after align.\n"
                     )
+                # Voice: default is local Qwen3-TTS, but a preset can pin the
+                # Voicebox voice studio (open-source app at 127.0.0.1:17493).
+                if preset.get("tts_provider") == "voicebox":
+                    voicebox_profile = preset.get("voicebox_profile", "Narrator")
+                    voice_lines = (
+                        f"Use the 'synthesize' command for voice, NOT 'silence'. "
+                        f"This preset uses the Voicebox voice studio: set PTV_VOICE_PROVIDER=voicebox and "
+                        f"PTV_VOICEBOX_PROFILE={voicebox_profile} before running synthesize. "
+                        f"If synthesize fails because Voicebox is unreachable, tell the user to launch the "
+                        f"Voicebox app (voicebox.sh) so it is listening at 127.0.0.1:17493 — do NOT silently "
+                        f"switch to another TTS provider. "
+                    )
+                else:
+                    voice_lines = (
+                        f"Use the 'synthesize' command (Qwen3-TTS local) for voice, NOT 'silence'. "
+                        f"Set PTV_QWEN_TTS_SPEAKER={preset.get('voice_speaker', 'serena')} and "
+                        f"PTV_QWEN_TTS_LANGUAGE={preset.get('voice_language', 'english')} before running synthesize. "
+                    )
                 preset_ctx = (
                     f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
                     f"- Image style: {preset.get('style_prompt', '')}\n"
@@ -436,9 +459,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                     f"Prefix ALL segment image_prompt and visual_beats image_prompt values with the style prompt above. "
                     f"For scene segments longer than ~6 seconds, write 2-4 visual_beats with storyboard fields "
                     f"(description, shot_type, composition, action, camera_motion) so LTX can bring each still's action to life and the final video changes visuals every 3-6 seconds. "
-                    f"Use the 'synthesize' command (Qwen3-TTS local) for voice, NOT 'silence'. "
-                    f"Set PTV_QWEN_TTS_SPEAKER={preset.get('voice_speaker', 'serena')} and "
-                    f"PTV_QWEN_TTS_LANGUAGE={preset.get('voice_language', 'english')} before running synthesize. "
+                    f"{voice_lines}"
                     f"Before imagegen, run `uv run python -m src.pipeline storyboard <run_dir>/script.json <run_dir>` and fix storyboard warnings. "
                     f"After videogen, run `uv run python -m src.pipeline manifest <run_dir>/script.json <run_dir>` before compositing. "
                     f"After compositing, run `uv run python -m src.pipeline qa <run_dir>` and fix failures.\n"

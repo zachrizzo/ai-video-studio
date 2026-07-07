@@ -101,6 +101,7 @@ def kenburns_clip(
     if actual is not None and abs(actual - duration_seconds) > 0.15:
         console.print(f"[yellow]  duration drift: wanted {duration_seconds:.2f}s, got {actual:.2f}s[/yellow]")
 
-    console.print(f"[green]  -> {output_path} ({actual:.2f}s)[/green]")
+    actual_str = f"{actual:.2f}s" if actual is not None else "?s"
+    console.print(f"[green]  -> {output_path} ({actual_str})[/green]")
     return {"success": True, "video_path": str(output_path), "duration": actual,
             "error_message": None}

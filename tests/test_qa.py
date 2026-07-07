@@ -1,9 +1,13 @@
 import json
+import socket
 import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
+from src.config import PipelineConfig
 from src.pipeline import cmd_manifest, cmd_storyboard
-from src.qa.run_qa import qa_run
+from src.qa.run_qa import _transcribe, qa_run
 from src.visuals.beats import ltx_motion_prompt, segment_visual_beats
 
 
@@ -266,3 +270,65 @@ def test_qa_checks_visual_beat_artifacts(tmp_path: Path, monkeypatch) -> None:
 
     assert "image.missing" not in check_ids
     assert "video.segment_missing" not in check_ids
+
+
+class _VoiceboxTranscribeHandler(BaseHTTPRequestHandler):
+    """Fake Voicebox /transcribe endpoint: returns a fixed transcript."""
+
+    def do_POST(self) -> None:  # noqa: N802 (http.server API)
+        length = int(self.headers.get("Content-Length", 0))
+        self.rfile.read(length)  # drain the multipart body
+        body = json.dumps({"text": "hello world", "duration": 1.0}).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+    def log_message(self, *args) -> None:  # silence the test server
+        pass
+
+
+def test_transcribe_voicebox_returns_server_text(tmp_path: Path, monkeypatch) -> None:
+    server = HTTPServer(("127.0.0.1", 0), _VoiceboxTranscribeHandler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("PTV_QA_ASR_PROVIDER", "voicebox")
+        monkeypatch.setenv("PTV_VOICEBOX_URL", f"http://127.0.0.1:{port}")
+
+        audio_path = tmp_path / "seg.wav"
+        audio_path.write_bytes(b"RIFF0000WAVEfake-audio-bytes")
+
+        config = PipelineConfig()
+        transcript, error = _transcribe(audio_path, config)
+
+        assert error is None
+        assert transcript == "hello world"
+    finally:
+        server.shutdown()
+        thread.join(timeout=5)
+
+
+def test_transcribe_voicebox_unreachable_is_actionable(tmp_path: Path, monkeypatch) -> None:
+    # Bind an ephemeral port then release it so nothing is listening there.
+    sock = socket.socket()
+    sock.bind(("127.0.0.1", 0))
+    dead_port = sock.getsockname()[1]
+    sock.close()
+
+    monkeypatch.setenv("PTV_QA_ASR_PROVIDER", "voicebox")
+    monkeypatch.setenv("PTV_VOICEBOX_URL", f"http://127.0.0.1:{dead_port}")
+
+    audio_path = tmp_path / "seg.wav"
+    audio_path.write_bytes(b"fake-audio-bytes")
+
+    config = PipelineConfig()
+    transcript, error = _transcribe(audio_path, config)
+
+    assert transcript is None
+    assert error is not None
+    assert "Voicebox /transcribe unreachable" in error
+    assert "voicebox.sh" in error
+    assert "PTV_QA_ASR_PROVIDER=cli" in error

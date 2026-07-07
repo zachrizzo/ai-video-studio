@@ -28,3 +28,22 @@ def generation_lock():
     finally:
         fcntl.flock(lock_file, fcntl.LOCK_UN)
         lock_file.close()
+
+
+@contextmanager
+def file_lock(lock_path):
+    """Cross-process mutual exclusion on an arbitrary file, via flock.
+
+    Used to serialize read-modify-write critical sections against a shared
+    file (e.g. a JSON registry) so concurrent writers don't clobber one
+    another's changes.
+    """
+    import fcntl
+
+    lock_file = open(lock_path, "w")
+    try:
+        fcntl.flock(lock_file, fcntl.LOCK_EX)  # block until free
+        yield
+    finally:
+        fcntl.flock(lock_file, fcntl.LOCK_UN)
+        lock_file.close()

@@ -37,6 +37,7 @@ import time
 import uuid
 from pathlib import Path
 
+from ..utils.locks import file_lock
 from .runs import _runs_root
 
 DEFAULT_PROJECT_ID = "default"
@@ -45,6 +46,12 @@ DEFAULT_PROJECT_NAME = "My Videos"
 
 def _registry_path() -> Path:
     return _runs_root() / "projects.json"
+
+
+def _registry_lock():
+    path = _registry_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    return file_lock(path.parent / (path.name + ".lock"))
 
 
 def _load() -> dict:
@@ -125,15 +132,16 @@ def create_project(name: str) -> dict:
     name = (name or "").strip()
     if not name:
         raise ValueError("project name must not be empty")
-    data = _ensure_default(_load())
-    pid = uuid.uuid4().hex[:8]
-    data["projects"][pid] = {
-        "id": pid,
-        "name": name,
-        "created_at": time.time(),
-        "conversations": {},
-    }
-    _save(data)
+    with _registry_lock():
+        data = _ensure_default(_load())
+        pid = uuid.uuid4().hex[:8]
+        data["projects"][pid] = {
+            "id": pid,
+            "name": name,
+            "created_at": time.time(),
+            "conversations": {},
+        }
+        _save(data)
     return {"id": pid, "name": name, "created_at": data["projects"][pid]["created_at"],
             "run_ids": [], "conversations": []}
 
@@ -142,11 +150,12 @@ def rename_project(project_id: str, name: str) -> bool:
     name = (name or "").strip()
     if not name:
         raise ValueError("project name must not be empty")
-    data = _ensure_default(_load())
-    if project_id not in data["projects"]:
-        return False
-    data["projects"][project_id]["name"] = name
-    _save(data)
+    with _registry_lock():
+        data = _ensure_default(_load())
+        if project_id not in data["projects"]:
+            return False
+        data["projects"][project_id]["name"] = name
+        _save(data)
     return True
 
 
@@ -154,14 +163,21 @@ def delete_project(project_id: str) -> bool:
     """Delete a project. Its runs fall back to the default project."""
     if project_id == DEFAULT_PROJECT_ID:
         raise ValueError("the default project cannot be deleted")
-    data = _ensure_default(_load())
-    if project_id not in data["projects"]:
-        return False
-    del data["projects"][project_id]
-    for run_id, pid in list(data["run_assignments"].items()):
-        if pid == project_id:
-            data["run_assignments"][run_id] = DEFAULT_PROJECT_ID
-    _save(data)
+    with _registry_lock():
+        data = _ensure_default(_load())
+        if project_id not in data["projects"]:
+            return False
+        default_convos = data["projects"][DEFAULT_PROJECT_ID].setdefault("conversations", {})
+        for cid, convo in data["projects"][project_id].get("conversations", {}).items():
+            target_cid = cid
+            while target_cid in default_convos:
+                target_cid = f"{project_id}_{target_cid}"
+            default_convos[target_cid] = convo
+        del data["projects"][project_id]
+        for run_id, pid in list(data["run_assignments"].items()):
+            if pid == project_id:
+                data["run_assignments"][run_id] = DEFAULT_PROJECT_ID
+        _save(data)
     return True
 
 
@@ -170,11 +186,12 @@ def delete_project(project_id: str) -> bool:
 # ---------------------------------------------------------------------------
 
 def assign_run(run_id: str, project_id: str) -> bool:
-    data = _ensure_default(_load())
-    if project_id not in data["projects"]:
-        return False
-    data["run_assignments"][run_id] = project_id
-    _save(data)
+    with _registry_lock():
+        data = _ensure_default(_load())
+        if project_id not in data["projects"]:
+            return False
+        data["run_assignments"][run_id] = project_id
+        _save(data)
     return True
 
 
@@ -199,38 +216,40 @@ def upsert_conversation(
     Moving a conversation between projects is intentionally unsupported; a
     conversation id is upserted into whichever project it already lives in.
     """
-    data = _ensure_default(_load())
-    if project_id not in data["projects"]:
-        return None
-    # If the conversation already exists in ANY project, update it there.
-    owner_pid = project_id
-    for pid, proj in data["projects"].items():
-        if conversation_id in proj.get("conversations", {}):
-            owner_pid = pid
-            break
-    convos = data["projects"][owner_pid].setdefault("conversations", {})
-    now = time.time()
-    record = convos.get(conversation_id) or {
-        "id": conversation_id,
-        "title": title or "New chat",
-        "claude_session_id": None,
-        "created_at": now,
-    }
-    if title:
-        record["title"] = title
-    if claude_session_id:
-        record["claude_session_id"] = claude_session_id
-    record["updated_at"] = now
-    convos[conversation_id] = record
-    _save(data)
+    with _registry_lock():
+        data = _ensure_default(_load())
+        if project_id not in data["projects"]:
+            return None
+        # If the conversation already exists in ANY project, update it there.
+        owner_pid = project_id
+        for pid, proj in data["projects"].items():
+            if conversation_id in proj.get("conversations", {}):
+                owner_pid = pid
+                break
+        convos = data["projects"][owner_pid].setdefault("conversations", {})
+        now = time.time()
+        record = convos.get(conversation_id) or {
+            "id": conversation_id,
+            "title": title or "New chat",
+            "claude_session_id": None,
+            "created_at": now,
+        }
+        if title:
+            record["title"] = title
+        if claude_session_id:
+            record["claude_session_id"] = claude_session_id
+        record["updated_at"] = now
+        convos[conversation_id] = record
+        _save(data)
     return record
 
 
 def delete_conversation(project_id: str, conversation_id: str) -> bool:
-    data = _ensure_default(_load())
-    proj = data["projects"].get(project_id)
-    if not proj or conversation_id not in proj.get("conversations", {}):
-        return False
-    del proj["conversations"][conversation_id]
-    _save(data)
+    with _registry_lock():
+        data = _ensure_default(_load())
+        proj = data["projects"].get(project_id)
+        if not proj or conversation_id not in proj.get("conversations", {}):
+            return False
+        del proj["conversations"][conversation_id]
+        _save(data)
     return True

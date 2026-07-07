@@ -71,10 +71,14 @@ system-font substitution.
 
 Declare images under `assets`. Each asset has an `id` and exactly one of:
 
-- `generate`: a FLUX request — `{prompt, width, height, cutout, seed}`. Width
-  and height must be multiples of 16. Set `cutout: true` for subjects that need
-  a transparent background (rembg). Seeds default to a deterministic hash so
-  rebuilds reproduce identical imagery.
+- `generate`: a local image request — `{prompt, width, height, cutout, seed}`.
+  Width and height must be multiples of 16. Set `cutout: true` for subjects that
+  need a transparent background (rembg) — for those, prompt a bold flat
+  silhouette on a plain cream/white background so the matte is clean. Seeds
+  default to a deterministic hash so rebuilds reproduce identical imagery. The
+  model is a config choice (`PTV_IMAGE_MODEL`), defaulting to `z-image-turbo`
+  (best archival/painterly fidelity); `schnell` is a faster, lower-fidelity
+  fallback.
 - `src`: a path (relative to the run dir) to an existing PNG you dropped in
   manually.
 

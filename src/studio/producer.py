@@ -186,13 +186,24 @@ def _run_command(
     )
     job.process = proc
 
-    assert proc.stdout is not None
-    for line in proc.stdout:
-        _append_log(status, line)
-        _write_status(run_dir, status)
+    try:
+        assert proc.stdout is not None
+        for line in proc.stdout:
+            _append_log(status, line)
+            _write_status(run_dir, status)
 
-    return_code = proc.wait()
-    job.process = None
+        return_code = proc.wait()
+    except BaseException:
+        if proc.poll() is None:
+            proc.kill()
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        raise
+    finally:
+        job.process = None
+
     if return_code != 0:
         raise RuntimeError(f"{step_label} failed with exit code {return_code}")
 
@@ -265,6 +276,7 @@ def _run_production(
     mode: str,
     force_video: bool,
     segment_ids: str,
+    speed: float | None,
 ) -> None:
     steps = _pipeline_steps(run_dir, mode, segment_ids)
     status = _initial_status(run_id, len(steps), mode, force_video, segment_ids)
@@ -275,6 +287,8 @@ def _run_production(
     env.setdefault("PTV_LTX_PREFER_EXTEND", "false")
     if force_video:
         env["PTV_VIDEO_FORCE"] = "true"
+    if speed is not None:
+        env["PTV_VIDEO_SPEED"] = str(speed)
 
     try:
         job = job_ref["job"]
@@ -325,6 +339,7 @@ def start_run_production(
     mode: str = "full",
     force_video: bool = False,
     segment_ids: str = "",
+    speed: float | None = None,
 ) -> dict[str, Any]:
     """Start or return the existing production job for a run."""
     run_dir = _safe_run_dir(run_id)
@@ -343,7 +358,7 @@ def start_run_production(
     job_ref: dict[str, ProductionJob] = {}
     thread = threading.Thread(
         target=_run_production,
-        args=(run_id, run_dir, job_ref, mode, force_video, segment_ids),
+        args=(run_id, run_dir, job_ref, mode, force_video, segment_ids, speed),
         daemon=True,
         name=f"run-producer-{run_id}-{mode}",
     )

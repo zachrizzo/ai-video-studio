@@ -1,4 +1,4 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, model_validator
 from typing import Literal
 
 
@@ -41,6 +41,15 @@ class SfxCue(BaseModel):
     occurrence: int = 1
     offset: float = 0.0
     gain_db: float = -12.0
+
+    @model_validator(mode="after")
+    def _exactly_one(self) -> "SfxCue":
+        set_fields = [f for f in ("at", "at_frac", "at_word") if getattr(self, f) is not None]
+        if len(set_fields) != 1:
+            raise ValueError(
+                f"SfxCue needs exactly one of at/at_frac/at_word, got {set_fields or 'none'}"
+            )
+        return self
 
 
 class VisualBeat(BaseModel):

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { createProject, deleteProject, fetchProjects, renameProject } from '../api'
 import type { Project } from '../api'
 
@@ -20,16 +20,19 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
   const [newName, setNewName] = useState('')
   const [renaming, setRenaming] = useState(false)
   const [renameValue, setRenameValue] = useState('')
+  const currentIdRef = useRef(currentId)
+  useEffect(() => { currentIdRef.current = currentId }, [currentId])
 
   const load = useCallback(async () => {
+    const requestedId = currentId
     try {
       const list = await fetchProjects()
       setProjects(list)
       const found = list.find(p => p.id === currentId) || list[0] || null
       if (found && found.id !== currentId) setCurrentId(found.id)
-      onProjectChange(found)
+      if (currentIdRef.current === requestedId) onProjectChange(found)
     } catch {
-      onProjectChange(null)
+      if (currentIdRef.current === requestedId) onProjectChange(null)
     }
   }, [currentId, onProjectChange])
 
@@ -42,6 +45,7 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
   const current = projects.find(p => p.id === currentId) || null
 
   const handleSelect = useCallback((id: string) => {
+    currentIdRef.current = id
     setCurrentId(id)
     const proj = projects.find(p => p.id === id) || null
     onProjectChange(proj)

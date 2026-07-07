@@ -70,7 +70,9 @@ export interface WsOutboundMessage {
     video_provider: string
     style_pack?: string | null
     default_visual_engine?: string | null
-  sfx_style?: string | null
+    sfx_style?: string | null
+    tts_provider?: string | null
+    voicebox_profile?: string | null
   } | null
 }
 
