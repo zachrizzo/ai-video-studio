@@ -141,6 +141,19 @@ def test_run_sfx_mixes_and_is_idempotent(tmp_path: Path, capsys: pytest.CaptureF
     assert wav.read_bytes() == first_bytes
 
 
+def test_run_sfx_preserves_narration_mtime(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    """Mixing must not trip the collage alignment-staleness (mtime) check."""
+    script = _write_script(tmp_path, sfx=[{"sound": "cannon_boom", "at_frac": 0.2}])
+    run_dir = _make_run(tmp_path)
+    wav = run_dir / "audio" / "audio_seg01.wav"
+    before = wav.stat().st_mtime
+
+    run_sfx(script, run_dir)
+    capsys.readouterr()
+
+    assert wav.stat().st_mtime == pytest.approx(before, abs=0.01)
+
+
 def test_run_sfx_unknown_sound_exits_nonzero(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
     script = _write_script(tmp_path, sfx=[{"sound": "laser_blast", "at_frac": 0.5}])
     run_dir = _make_run(tmp_path)

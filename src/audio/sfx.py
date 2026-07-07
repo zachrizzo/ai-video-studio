@@ -338,8 +338,15 @@ def run_sfx(script_path: Path, run_dir: Path) -> None:
                     words=words,
                 )
                 events.append((wav, start, cue.gain_db))
+            # Mixing never changes narration timing, so word alignment stays
+            # valid. Preserve the wav's pre-mix mtime so the collage builder's
+            # alignment-staleness check (mtime-based) is not tripped by the mix.
+            stat = narration.stat()
             mix_sfx_into_narration(narration, events, tmp)
             tmp.replace(narration)
+            import os
+
+            os.utime(narration, (stat.st_atime, stat.st_mtime))
             applied[sid] = [
                 {"sound": c.sound, "gain_db": c.gain_db} for c in seg.sfx
             ]
