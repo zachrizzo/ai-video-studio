@@ -31,6 +31,13 @@ Determinism rules (enforced by the validator's collage branch):
   relative paths are allowed.
 - Masks are CSS/SVG only. Never read pixels back from canvases containing
   `file://`-loaded images (tainted canvas throws).
+- Animated SVG `clipPath` geometry (`clipPathUnits="objectBoundingBox"`): put
+  the `transform` directly on the `<path>`, never on a wrapping `<g>`. A `<g
+  transform="...">` inside such a clipPath — even an identity transform —
+  renders the clipped target fully invisible in Chromium whenever the target
+  also has `will-change` set. This is a real Chromium/Skia bug, confirmed by
+  isolated reproduction (headed and headless); it is not a logic error in the
+  runtime. `buildMask`'s `head_silhouette` branch works around it this way.
 
 The frame renderer (src/animation/frame_renderer.py) is the ONLY html/collage
 render path — there is no real-time recorder fallback. A scene that does not

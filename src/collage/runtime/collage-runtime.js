@@ -547,21 +547,27 @@
       clipId = "collage-clip-" + maskCounter++;
       var holder = document.createElement("div");
       holder.className = "collage-clip-holder";
+      // NOTE: the transform MUST live on the <path> itself, not a wrapping
+      // <g transform="...">. Chromium has a rendering bug where a <g> with a
+      // transform (even an identity transform) inside an objectBoundingBox
+      // clipPath makes the clipped target fully invisible whenever the target
+      // also has `will-change` set. Putting the transform directly on the
+      // <path> avoids the bug and renders identically.
       holder.innerHTML =
         '<svg width="0" height="0"><defs><clipPath id="' +
         clipId +
-        '" clipPathUnits="objectBoundingBox"><g class="collage-clip-g"><path d="' +
+        '" clipPathUnits="objectBoundingBox"><path class="collage-clip-path" d="' +
         HEAD_PATH +
-        '" /></g></clipPath></defs></svg>';
+        '" /></clipPath></defs></svg>';
       stage.appendChild(holder);
       targetNode.style.clipPath = "url(#" + clipId + ")";
       targetNode.style.webkitClipPath = "url(#" + clipId + ")";
-      var clipG = holder.querySelector(".collage-clip-g");
+      var clipPathEl = holder.querySelector(".collage-clip-path");
       renderers.push(function (t) {
         var prog = easeInOut(clamp01((t - el.reveal) / el.duration));
         // grow the silhouette from a point at its center
         var s = prog;
-        clipG.setAttribute(
+        clipPathEl.setAttribute(
           "transform",
           "translate(" + 0.5 * (1 - s) + "," + 0.5 * (1 - s) + ") scale(" + s + ")"
         );
