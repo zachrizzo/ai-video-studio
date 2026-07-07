@@ -59,6 +59,7 @@ export interface WsOutboundMessage {
   run_id: string | null
   conversation_id?: string
   session_id?: string | null
+  project_id?: string | null
   preset?: {
     name: string
     style_prompt: string

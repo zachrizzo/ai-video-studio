@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import { ChatWebSocket } from '../ws'
 import type { WsInboundMessage } from '../ws'
+import { deleteProjectConversation, upsertProjectConversation } from '../api'
 
 // ── Local view models ──────────────────────────────────────────────────────────
 
@@ -39,6 +40,8 @@ interface ChatPanelProps {
   currentRunId: string | null
   /** The currently-viewed run title, used to recover chat/run associations. */
   currentRunTitle?: string | null
+  /** The active project — conversations are scoped to it. */
+  currentProjectId: string | null
   /** Called when Claude writes/updates an artifact, so the viewer can refresh. */
   onArtifactUpdated: (runId: string) => void
   /** Reports websocket connection state up to the top bar. */
@@ -75,6 +78,7 @@ interface Conversation {
   createdAt: number
   runId?: string | null
   claudeSessionId?: string | null
+  projectId?: string | null
 }
 
 const STORAGE_KEY = 'vs_conversations'
@@ -130,6 +134,7 @@ function normalizeConversations(value: unknown, settleRunning = false): Conversa
       createdAt: typeof item.createdAt === 'number' ? item.createdAt : Date.now(),
       runId: typeof item.runId === 'string' ? item.runId : null,
       claudeSessionId: typeof item.claudeSessionId === 'string' ? item.claudeSessionId : null,
+      projectId: typeof item.projectId === 'string' ? item.projectId : null,
     })
   }
   return conversations.sort((a, b) => b.createdAt - a.createdAt)
@@ -206,10 +211,19 @@ function findLikelyConversationForRun(
   return best?.conversation || null
 }
 
-export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, onConnectionChange, activePreset }: ChatPanelProps) {
+export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onArtifactUpdated, onConnectionChange, activePreset }: ChatPanelProps) {
   const initialConversations = useMemo(() => loadConversations(), [])
   const [conversations, setConversations] = useState<Conversation[]>(initialConversations)
   const [activeConvoId, setActiveConvoId] = useState<string | null>(initialConversations[0]?.id ?? null)
+  // Conversations are scoped to the active project. Legacy chats (no
+  // projectId) belong to the default project so nothing disappears.
+  const projectKey = currentProjectId || 'default'
+  const visibleConversations = useMemo(
+    () => conversations.filter(c => (c.projectId || 'default') === projectKey),
+    [conversations, projectKey],
+  )
+  const projectIdRef = useRef(currentProjectId)
+  useEffect(() => { projectIdRef.current = currentProjectId }, [currentProjectId])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
   const [showHistory, setShowHistory] = useState(false)
@@ -258,13 +272,16 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
   }, [])
 
   const deleteConversation = useCallback((id: string) => {
+    const convo = conversations.find(c => c.id === id)
     commitConversations(prev => prev.filter(c => c.id !== id))
     if (id === activeConvoId) {
       setActiveConvoId(null)
       setDraftForRunId(runIdRef.current)
       setManualConversationId(null)
     }
-  }, [activeConvoId, commitConversations])
+    // Keep the server-side project record in sync (best-effort).
+    deleteProjectConversation(convo?.projectId || projectIdRef.current || 'default', id).catch(() => {})
+  }, [activeConvoId, commitConversations, conversations])
 
   const bindConversationToRun = useCallback((conversationId: string, runId: string) => {
     if (!conversationId || !runId || runId === 'unknown') return
@@ -317,12 +334,23 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
     }
   }, [activeConvoId, conversations])
 
+  // When the project changes, land on that project's most recent chat.
+  useEffect(() => {
+    const active = conversations.find(c => c.id === activeConvoId)
+    if (active && (active.projectId || 'default') === projectKey) return
+    const first = visibleConversations[0]
+    setActiveConvoId(first ? first.id : null)
+    setManualConversationId(null)
+    setDraftForRunId(null)
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [projectKey])
+
   // Keep the chat panel tied to the selected flow without saving empty ghost chats.
   useEffect(() => {
     if (!currentRunId || busy) return
     if (manualConversationId) return
     if (draftForRunId === currentRunId) return
-    const existing = conversations.find(c => c.runId === currentRunId)
+    const existing = visibleConversations.find(c => c.runId === currentRunId)
     if (existing) {
       if (existing.id !== activeConvoId) {
         setActiveConvoId(existing.id)
@@ -331,7 +359,7 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
       return
     }
 
-    const likely = findLikelyConversationForRun(conversations, currentRunId, currentRunTitle)
+    const likely = findLikelyConversationForRun(visibleConversations, currentRunId, currentRunTitle)
     if (likely) {
       bindConversationToRun(likely.id, currentRunId)
       setActiveConvoId(likely.id)
@@ -488,6 +516,7 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
     const conversationId = activeConversation?.id || newConvoId()
     const claudeSessionId = activeConversation?.claudeSessionId || null
     const title = activeConversation?.title || text.slice(0, 40) || flowTitle(runId)
+    const projectId = activeConversation?.projectId || projectIdRef.current || 'default'
 
     commitConversations(prev => {
       const exists = prev.find(c => c.id === conversationId)
@@ -498,6 +527,7 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
                 ...c,
                 title: c.title || title,
                 runId: c.runId || runId,
+                projectId: c.projectId || projectId,
                 messages: [...c.messages, userMsg, assistantMsg],
                 createdAt: Date.now(),
               }
@@ -511,8 +541,11 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
         createdAt: Date.now(),
         runId,
         claudeSessionId: null,
+        projectId,
       }, ...prev]
     })
+    // Record the chat on its project server-side (best-effort).
+    upsertProjectConversation(projectId, { id: conversationId, title }).catch(() => {})
     activeAssistantIds.current[conversationId] = assistantId
     inFlightConvoId.current = conversationId
     setActiveConvoId(conversationId)
@@ -526,6 +559,7 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
       run_id: runId,
       conversation_id: conversationId,
       session_id: claudeSessionId,
+      project_id: projectId,
       preset: presetRef.current || null,
     })
   }
@@ -554,10 +588,10 @@ export function ChatPanel({ currentRunId, currentRunTitle, onArtifactUpdated, on
 
       {showHistory && (
         <div className="chat-history-list">
-          {conversations.length === 0 && (
-            <div className="chat-history-empty">No conversations yet</div>
+          {visibleConversations.length === 0 && (
+            <div className="chat-history-empty">No conversations in this project yet</div>
           )}
-          {conversations.map(c => (
+          {visibleConversations.map(c => (
             <div
               key={c.id}
               className={`chat-history-item ${c.id === activeConvoId ? 'active' : ''}`}

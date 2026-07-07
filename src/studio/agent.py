@@ -230,6 +230,7 @@ async def handle_ws(websocket: WebSocket) -> None:
     # Per-connection state
     session_ids_by_conversation: dict[str, str] = {}
     active_run_ids_by_conversation: dict[str, str] = {}
+    project_ids_by_conversation: dict[str, str] = {}
     active_conversation_id = "default"
     active_run_id: str | None = None
     # Queue used to bridge sync hook callbacks → async ws.send_json
@@ -351,6 +352,49 @@ async def handle_ws(websocket: WebSocket) -> None:
                 active_run_ids_by_conversation[conversation_id] = msg_run_id
             active_run_id = active_run_ids_by_conversation.get(conversation_id)
 
+            # Track the conversation's project and inject project context so
+            # every chat in a project shares awareness of its videos.
+            msg_project_id = msg.get("project_id")
+            if isinstance(msg_project_id, str) and msg_project_id:
+                project_ids_by_conversation[conversation_id] = msg_project_id
+            project_id = project_ids_by_conversation.get(conversation_id)
+            if project_id:
+                try:
+                    from src.studio import projects as projects_store
+
+                    project = next(
+                        (p for p in projects_store.list_projects() if p["id"] == project_id),
+                        None,
+                    )
+                except Exception:  # noqa: BLE001
+                    project = None
+                if project:
+                    from src.studio.runs import get_run
+
+                    run_lines = []
+                    for rid in project["run_ids"][:12]:
+                        try:
+                            manifest = get_run(rid) or {}
+                            title = manifest.get("title", rid)
+                        except Exception:  # noqa: BLE001
+                            title = rid
+                        run_lines.append(f"  - {rid}: {title}")
+                    other_chats = len(project.get("conversations", []))
+                    project_ctx = (
+                        f"\n\n[ACTIVE PROJECT: {project['name']} (id {project_id})]\n"
+                        f"- This chat belongs to the project above; the project has "
+                        f"{other_chats} chat(s) and {len(project['run_ids'])} video run(s).\n"
+                    )
+                    if run_lines:
+                        project_ctx += (
+                            "- Existing video runs in this project:\n" + "\n".join(run_lines) + "\n"
+                            "When the user refers to 'the video', 'the storyboard', or asks for "
+                            "edits without naming a run, prefer this project's runs (the active "
+                            "run first). New videos you create in this chat belong to this "
+                            "project automatically.\n"
+                        )
+                    user_text = user_text + project_ctx
+
             # Inject preset context so the agent knows the user's chosen style
             preset = msg.get("preset")
             if preset:
@@ -438,6 +482,20 @@ async def handle_ws(websocket: WebSocket) -> None:
                         new_sid = event.data.get("session_id")
                         if new_sid:
                             session_ids_by_conversation[conversation_id] = new_sid
+                            # Persist the session id on the project's conversation
+                            # record so the chat can resume from any browser.
+                            convo_project = project_ids_by_conversation.get(conversation_id)
+                            if convo_project:
+                                try:
+                                    from src.studio import projects as projects_store
+
+                                    projects_store.upsert_conversation(
+                                        convo_project,
+                                        conversation_id,
+                                        claude_session_id=new_sid,
+                                    )
+                                except Exception:  # noqa: BLE001
+                                    logger.exception("failed to persist conversation session")
                             await _send(
                                 {
                                     "type": "session",
@@ -539,6 +597,17 @@ async def handle_ws(websocket: WebSocket) -> None:
                 changed_run_id = changed_runs[0][0]
                 active_run_id = changed_run_id
                 active_run_ids_by_conversation[conversation_id] = changed_run_id
+                # Runs created/touched by this chat belong to the chat's project.
+                convo_project = project_ids_by_conversation.get(conversation_id)
+                if convo_project:
+                    try:
+                        from src.studio import projects as projects_store
+
+                        for new_run_id, _ in changed_runs:
+                            if new_run_id not in runs_before_query:
+                                projects_store.assign_run(new_run_id, convo_project)
+                    except Exception:  # noqa: BLE001
+                        logger.exception("failed to assign run to project")
                 await _send(
                     {
                         "type": "artifact_updated",

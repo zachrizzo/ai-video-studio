@@ -3,6 +3,8 @@ import { ChatPanel } from './components/ChatPanel'
 import { FlowViewer } from './components/FlowViewer'
 import { GeneratePanel } from './components/GeneratePanel'
 import { PresetBar } from './components/PresetBar'
+import { ProjectBar } from './components/ProjectBar'
+import type { Project } from './api'
 
 type Tab = 'story' | 'generate'
 
@@ -21,15 +23,23 @@ export default function App() {
   const [artifactRefreshRunId, setArtifactRefreshRunId] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
   const [activePreset, setActivePreset] = useState<any>(null)
+  const [currentProject, setCurrentProject] = useState<Project | null>(null)
+  const [projectRefreshToken, setProjectRefreshToken] = useState(0)
 
   const handleArtifactUpdated = useCallback((runId: string) => {
     setArtifactRefreshRunId(null)
     requestAnimationFrame(() => setArtifactRefreshRunId(runId))
+    // New runs may have been created/assigned — refresh project counts.
+    setProjectRefreshToken(t => t + 1)
   }, [])
 
   const handleRunChange = useCallback((runId: string, title?: string) => {
     setCurrentRunId(runId)
     setCurrentRunTitle(title || null)
+  }, [])
+
+  const handleProjectChange = useCallback((project: Project | null) => {
+    setCurrentProject(project)
   }, [])
 
   return (
@@ -63,17 +73,20 @@ export default function App() {
       </div>
 
       <div style={{ display: activeTab === 'story' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>
+        <ProjectBar onProjectChange={handleProjectChange} refreshToken={projectRefreshToken} />
         <PresetBar onPresetChange={setActivePreset} />
         <div className="panels">
           <ChatPanel
             currentRunId={currentRunId}
             currentRunTitle={currentRunTitle}
+            currentProjectId={currentProject?.id ?? null}
             onArtifactUpdated={handleArtifactUpdated}
             onConnectionChange={setConnected}
             activePreset={activePreset}
           />
           <FlowViewer
             artifactRefreshRunId={artifactRefreshRunId}
+            currentProjectId={currentProject?.id ?? null}
             onRunIdChange={handleRunChange}
           />
         </div>

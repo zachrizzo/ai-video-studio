@@ -99,6 +99,23 @@ export interface RunSummary {
   final_video_url: string | null
   qa_status?: 'passed' | 'warning' | 'failed' | null
   production?: RunProductionStatus | null
+  project_id?: string
+}
+
+export interface ProjectConversation {
+  id: string
+  title: string
+  claude_session_id?: string | null
+  created_at: number
+  updated_at?: number
+}
+
+export interface Project {
+  id: string
+  name: string
+  created_at: number
+  run_ids: string[]
+  conversations: ProjectConversation[]
 }
 
 export interface RunDetail {
@@ -128,6 +145,59 @@ export async function fetchRuns(): Promise<RunSummary[]> {
 
 export async function fetchRun(runId: string): Promise<RunDetail> {
   return apiFetch<RunDetail>(`/api/runs/${runId}`)
+}
+
+export async function fetchProjects(): Promise<Project[]> {
+  const data = await apiFetch<{ projects: Project[] }>('/api/projects')
+  return data.projects
+}
+
+export async function createProject(name: string): Promise<Project> {
+  return apiFetch<Project>('/api/projects', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+}
+
+export async function renameProject(projectId: string, name: string): Promise<void> {
+  await apiFetch(`/api/projects/${projectId}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  })
+}
+
+export async function deleteProject(projectId: string): Promise<void> {
+  await apiFetch(`/api/projects/${projectId}`, { method: 'DELETE' })
+}
+
+export async function assignRunToProject(projectId: string, runId: string): Promise<void> {
+  await apiFetch(`/api/projects/${projectId}/runs`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ run_id: runId }),
+  })
+}
+
+export async function upsertProjectConversation(
+  projectId: string,
+  conversation: { id: string; title?: string; claude_session_id?: string | null },
+): Promise<ProjectConversation> {
+  return apiFetch<ProjectConversation>(`/api/projects/${projectId}/conversations`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(conversation),
+  })
+}
+
+export async function deleteProjectConversation(
+  projectId: string,
+  conversationId: string,
+): Promise<void> {
+  await apiFetch(`/api/projects/${projectId}/conversations/${conversationId}`, {
+    method: 'DELETE',
+  })
 }
 
 export async function fetchRunProduction(runId: string): Promise<RunProductionStatus> {

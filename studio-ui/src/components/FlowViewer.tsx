@@ -6,7 +6,13 @@ import { SegmentCard } from './SegmentCard'
 interface FlowViewerProps {
   /** run_id to highlight / auto-refresh when an artifact_updated event arrives */
   artifactRefreshRunId: string | null
+  /** The active project — the flow list is scoped to it. */
+  currentProjectId: string | null
   onRunIdChange: (runId: string, title?: string) => void
+}
+
+function inProject(run: RunSummary, projectId: string | null): boolean {
+  return (run.project_id || 'default') === (projectId || 'default')
 }
 
 function formatDuration(s: number): string {
@@ -16,9 +22,10 @@ function formatDuration(s: number): string {
   return `${sec}s`
 }
 
-export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerProps) {
+export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChange }: FlowViewerProps) {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const projectRuns = runs.filter((r) => inProject(r, currentProjectId))
   const [detail, setDetail] = useState<RunDetail | null>(null)
   const [loadingRuns, setLoadingRuns] = useState(true)
   const [loadingDetail, setLoadingDetail] = useState(false)
@@ -27,16 +34,23 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
   const [produceBusy, setProduceBusy] = useState(false)
   const [produceError, setProduceError] = useState<string | null>(null)
 
-  // ── Load run list on mount ────────────────────────────────────────────────
+  // ── Load run list on mount and whenever the project changes ──────────────
   useEffect(() => {
     setLoadingRuns(true)
     fetchRuns()
       .then((r) => {
         setRuns(r)
-        if (r.length > 0) {
-          const first = r[0]
-          setSelectedId(first.id)
-          onRunIdChange(first.id, first.title)
+        const scoped = r.filter((x) => inProject(x, currentProjectId))
+        const selectedStillVisible = scoped.some((x) => x.id === selectedId)
+        if (!selectedStillVisible) {
+          const first = scoped[0]
+          if (first) {
+            setSelectedId(first.id)
+            onRunIdChange(first.id, first.title)
+          } else {
+            setSelectedId(null)
+            setDetail(null)
+          }
         }
       })
       .catch((e: unknown) => {
@@ -44,7 +58,8 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
         setRunsError(msg)
       })
       .finally(() => setLoadingRuns(false))
-  }, [onRunIdChange])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [onRunIdChange, currentProjectId])
 
   // ── When an artifact event arrives, refresh the run list. If it names a run
   //    we don't have selected (e.g. a brand-new chat-created run), switch to it.
@@ -187,7 +202,8 @@ export function FlowViewer({ artifactRefreshRunId, onRunIdChange }: FlowViewerPr
             onChange={handleRunChange}
             aria-label="Select run"
           >
-            {runs.map((r) => (
+            {projectRuns.length === 0 && <option value="">No videos in this project yet</option>}
+            {projectRuns.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.title || r.id}
               </option>

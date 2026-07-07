@@ -208,14 +208,114 @@ class ProduceRunRequest(BaseModel):
 
 @app.get("/api/runs")
 async def api_list_runs() -> dict:
-    """List all runs with summary metadata."""
+    """List all runs with summary metadata (including their project)."""
+    from src.studio import projects as projects_store
+
     runs = list_runs()
     for run in runs:
         try:
             run["production"] = get_run_production_status(run["id"])
         except Exception:
             pass
+        run["project_id"] = projects_store.project_for_run(run["id"])
     return {"runs": runs}
+
+
+# ---------------------------------------------------------------------------
+# Projects — group runs + chat conversations
+# ---------------------------------------------------------------------------
+
+
+class ProjectCreateRequest(BaseModel):
+    name: str
+
+
+class ProjectRenameRequest(BaseModel):
+    name: str
+
+
+class ProjectRunAssignRequest(BaseModel):
+    run_id: str
+
+
+class ProjectConversationUpsertRequest(BaseModel):
+    id: str
+    title: str | None = None
+    claude_session_id: str | None = None
+
+
+@app.get("/api/projects")
+async def api_list_projects() -> dict:
+    """All projects with their run ids and conversation records."""
+    from src.studio import projects as projects_store
+
+    return {"projects": projects_store.list_projects()}
+
+
+@app.post("/api/projects")
+async def api_create_project(req: ProjectCreateRequest) -> dict:
+    from src.studio import projects as projects_store
+
+    try:
+        return projects_store.create_project(req.name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.patch("/api/projects/{project_id}")
+async def api_rename_project(project_id: str, req: ProjectRenameRequest) -> dict:
+    from src.studio import projects as projects_store
+
+    try:
+        if not projects_store.rename_project(project_id, req.name):
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.delete("/api/projects/{project_id}")
+async def api_delete_project(project_id: str) -> dict:
+    from src.studio import projects as projects_store
+
+    try:
+        if not projects_store.delete_project(project_id):
+            raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/runs")
+async def api_assign_run_to_project(project_id: str, req: ProjectRunAssignRequest) -> dict:
+    from src.studio import projects as projects_store
+
+    if not projects_store.assign_run(req.run_id, project_id):
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return {"ok": True}
+
+
+@app.post("/api/projects/{project_id}/conversations")
+async def api_upsert_project_conversation(
+    project_id: str, req: ProjectConversationUpsertRequest
+) -> dict:
+    from src.studio import projects as projects_store
+
+    record = projects_store.upsert_conversation(
+        project_id, req.id, title=req.title, claude_session_id=req.claude_session_id
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail=f"Project '{project_id}' not found")
+    return record
+
+
+@app.delete("/api/projects/{project_id}/conversations/{conversation_id}")
+async def api_delete_project_conversation(project_id: str, conversation_id: str) -> dict:
+    from src.studio import projects as projects_store
+
+    if not projects_store.delete_conversation(project_id, conversation_id):
+        raise HTTPException(status_code=404, detail="conversation not found in project")
+    return {"ok": True}
 
 
 @app.get("/api/runs/{run_id}")
