@@ -1,0 +1,39 @@
+/* Anthropic Documentary — additive style-pack overrides.
+ *
+ * The base collage runtime CSS is owned by the builder workstream; this file is
+ * appended to it. Keep it additive and generic: expose the palette as custom
+ * properties and scope tweaks under .collage-style-anthropic so it composes even
+ * if the base class names differ slightly. */
+
+:root {
+  --paper: #F0EEE6;
+  --ink: #1F1E1B;
+  --accent: #D97757;
+  --muted: #8A8778;
+  --sky: #B8C4C9;
+  --sepia: #C4A582;
+  --shadow: #3D3A34;
+}
+
+.collage-style-anthropic {
+  background-color: var(--paper);
+  color: var(--ink);
+}
+
+/* Torn-paper word labels: warm archival chip tint + tightened tracking. */
+.collage-style-anthropic .label,
+.collage-style-anthropic .collage-label {
+  letter-spacing: 0.02em;
+}
+
+.collage-style-anthropic .label--torn,
+.collage-style-anthropic .collage-label.torn {
+  background-color: var(--sepia);
+  color: var(--ink);
+  box-shadow: 0 1px 2px rgba(61, 58, 52, 0.18);
+}
+
+.collage-style-anthropic .label--mono,
+.collage-style-anthropic .collage-label.mono {
+  letter-spacing: 0.04em;
+}

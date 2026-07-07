@@ -1,0 +1,44 @@
+{
+  "spec_version": 1,
+  "segment_id": "split_experiment",
+  "duration_seconds": 10.0,
+  "fps": 30,
+  "style_pack": "anthropic_docu",
+  "background": "$palette.paper",
+  "assets": [
+    {
+      "id": "trial_a",
+      "role": "panel",
+      "generate": { "prompt": "beaker of clear liquid, cut-paper scientific illustration", "width": 720, "height": 1088 }
+    },
+    {
+      "id": "trial_b",
+      "role": "panel",
+      "generate": { "prompt": "beaker of terracotta liquid, cut-paper scientific illustration", "width": 720, "height": 1088 }
+    }
+  ],
+  "elements": [
+    {
+      "id": "experiment",
+      "type": "split",
+      "direction": "horizontal",
+      "gap": 0.06,
+      "enter": { "at_frac": 0.05 },
+      "panels": [
+        { "asset_id": "trial_a", "label": "control" },
+        { "asset_id": "trial_b", "label": "treated" }
+      ]
+    },
+    {
+      "id": "caption",
+      "type": "typewriter",
+      "text": "Two beakers, one difference.",
+      "x": 0.12,
+      "y": 0.82,
+      "speed_cps": 16,
+      "font": "mono",
+      "color": "$palette.ink",
+      "enter": { "at_frac": 0.45 }
+    }
+  ]
+}

@@ -1,15 +1,15 @@
 """TimeRef resolution against real narration timing.
 
-Frozen signature (docs/collage/CONTRACTS.md): the builder calls
+Frozen signature (docs/collage/CONTRACTS.md §5): the builder calls
 ``resolve_time(ref, narration_text=..., duration_seconds=..., words=...)``
 where ``duration_seconds`` is the REAL audio duration (audio-manifest override
 already applied) and ``words`` is the segment's entry from alignment.json
 (``[{"w": str, "start": float, "end": float}]``) or None when unavailable.
 
-This module ships with the linear-estimate implementation so builds never
-block on whisper. The alignment workstream replaces the word lookup with
-real timestamps while keeping this exact signature and the estimate as the
-per-cue fallback.
+There is NO linear-estimate fallback (§3, §4): an ``at_word`` TimeRef requires
+real alignment. If ``words`` is None or the word/occurrence is not found,
+``resolve_time`` raises ``ValueError`` with an actionable message. ``at`` and
+``at_frac`` refs never need alignment.
 """
 
 from __future__ import annotations
@@ -26,27 +26,6 @@ def normalize_word(token: str) -> str:
     return match.group(0) if match else ""
 
 
-def _script_words(narration_text: str) -> list[str]:
-    return [w for w in (normalize_word(t) for t in narration_text.split()) if w]
-
-
-def _estimate_word_time(word: str, occurrence: int, narration_text: str, duration: float) -> float:
-    """Linear estimate: position of the word among script words × duration."""
-    words = _script_words(narration_text)
-    if not words:
-        return 0.0
-    target = normalize_word(word)
-    seen = 0
-    for i, w in enumerate(words):
-        if w == target:
-            seen += 1
-            if seen == occurrence:
-                return duration * i / len(words)
-    # Word not in narration at all: fall back to mid-scene rather than raising —
-    # the builder surfaces a warning, never a hard failure.
-    return duration * 0.5
-
-
 def resolve_time(
     ref: Any,
     *,
@@ -54,13 +33,17 @@ def resolve_time(
     duration_seconds: float,
     words: list[dict[str, Any]] | None = None,
 ) -> float:
-    """Resolve a TimeRef to absolute scene seconds, clamped to [0, duration]."""
+    """Resolve a TimeRef to absolute scene seconds, clamped to [0, duration].
+
+    Raises ValueError for an ``at_word`` ref when alignment is missing or the
+    word/occurrence cannot be found.
+    """
     if ref.at is not None:
         t = ref.at
     elif ref.at_frac is not None:
         t = ref.at_frac * duration_seconds
     else:
-        t = _resolve_word(ref.at_word, ref.occurrence, narration_text, duration_seconds, words)
+        t = _resolve_word(ref.at_word, ref.occurrence, words)
     t += ref.offset
     return max(0.0, min(t, duration_seconds))
 
@@ -68,20 +51,29 @@ def resolve_time(
 def _resolve_word(
     word: str,
     occurrence: int,
-    narration_text: str,
-    duration: float,
     words: list[dict[str, Any]] | None,
 ) -> float:
-    if words:
-        target = normalize_word(word)
-        seen = 0
-        for entry in words:
-            if normalize_word(str(entry.get("w", ""))) == target:
-                seen += 1
-                if seen == occurrence:
-                    try:
-                        return float(entry["start"])
-                    except (KeyError, TypeError, ValueError):
-                        break
-    # Missing word (or no alignment): linear estimate for this cue only.
-    return _estimate_word_time(word, occurrence, narration_text, duration)
+    if not words:
+        raise ValueError(
+            f"TimeRef at_word={word!r} needs word-level alignment, but none is "
+            f"available for this segment. Run `python -m src.pipeline align "
+            f"<script.json> <run_dir>` (whisper) before building collage scenes."
+        )
+    target = normalize_word(word)
+    seen = 0
+    for entry in words:
+        if normalize_word(str(entry.get("w", ""))) == target:
+            seen += 1
+            if seen == occurrence:
+                try:
+                    return float(entry["start"])
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"TimeRef at_word={word!r} (occurrence {occurrence}) matched an "
+                        f"alignment entry with no usable start time: {entry!r}"
+                    ) from exc
+    raise ValueError(
+        f"TimeRef at_word={word!r} (occurrence {occurrence}) not found in the "
+        f"aligned narration. Correct the spec's word/occurrence or re-run `align` "
+        f"if the audio changed."
+    )

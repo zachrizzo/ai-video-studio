@@ -11,6 +11,13 @@ interface Preset {
   voice_language: string
   video_provider: string
   narration_style: string
+  style_pack?: string | null
+  default_visual_engine?: string | null
+}
+
+interface StylePack {
+  id: string
+  name: string
 }
 
 const SPEAKERS = ['serena', 'vivian', 'aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'sohee', 'uncle_fu']
@@ -31,9 +38,17 @@ function dedupePresets(items: Preset[]): Preset[] {
 export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset) => void }) {
   const [presets, setPresets] = useState<Preset[]>([])
   const [activePreset, setActivePreset] = useState<Preset | null>(null)
+  const [stylePacks, setStylePacks] = useState<StylePack[]>([])
   const [expanded, setExpanded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveName, setSaveName] = useState('')
+
+  useEffect(() => {
+    fetch('/api/style_packs')
+      .then(r => r.json())
+      .then(data => setStylePacks(data.style_packs || data.packs || []))
+      .catch(() => setStylePacks([]))
+  }, [])
 
   useEffect(() => {
     fetch('/api/presets')
@@ -175,6 +190,30 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
               >
                 <option value="ltx">LTX-2.3 action</option>
                 <option value="kenburns">Ken Burns fallback</option>
+              </select>
+            </div>
+            <div className="preset-field">
+              <label className="preset-field-label">Style pack</label>
+              <select
+                className="preset-select-sm"
+                value={activePreset.style_pack || ''}
+                onChange={e => updateField('style_pack', e.target.value)}
+              >
+                <option value="">none</option>
+                {stylePacks.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+              </select>
+            </div>
+            <div className="preset-field">
+              <label className="preset-field-label">Engine</label>
+              <select
+                className="preset-select-sm"
+                value={activePreset.default_visual_engine || ''}
+                onChange={e => updateField('default_visual_engine', e.target.value)}
+              >
+                <option value="">auto</option>
+                <option value="collage">collage</option>
+                <option value="html">html</option>
+                <option value="manim">manim</option>
               </select>
             </div>
           </div>

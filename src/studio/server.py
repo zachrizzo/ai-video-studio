@@ -26,6 +26,7 @@ from src.studio.runs import _runs_root, get_run, list_runs
 from src.studio.producer import get_run_production_status, start_run_production
 from src.studio.agent import handle_ws
 from src.studio.presets import list_presets, get_preset, save_preset, delete_preset
+from src.studio.style_packs import list_style_packs
 from src.studio.generate import (
     get_generation, list_generations,
     start_image_generation, start_video_generation,
@@ -436,6 +437,16 @@ async def api_delete_preset(preset_id: str) -> dict:
     if not ok:
         raise HTTPException(status_code=404, detail="Preset not found or is built-in")
     return {"deleted": True}
+
+
+# ---------------------------------------------------------------------------
+# Style packs
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/style_packs")
+async def api_list_style_packs() -> dict:
+    return {"style_packs": list_style_packs()}
 
 
 # ---------------------------------------------------------------------------

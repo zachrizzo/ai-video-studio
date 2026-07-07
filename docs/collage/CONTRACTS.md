@@ -32,10 +32,11 @@ Determinism rules (enforced by the validator's collage branch):
 - Masks are CSS/SVG only. Never read pixels back from canvases containing
   `file://`-loaded images (tainted canvas throws).
 
-The frame renderer (src/animation/frame_renderer.py):
+The frame renderer (src/animation/frame_renderer.py) is the ONLY html/collage
+render path — there is no real-time recorder fallback. A scene that does not
+define `window.seek` fails with a clear error telling the author to implement
+the seek contract. The frame renderer:
 
-- probes `typeof window.seek === 'function'`; scenes without it use the
-  legacy real-time recorder unchanged.
 - waits for `sceneReady` at most 10 s, then steps `seek(frame / fps)` →
   screenshot → `ffmpeg -f image2pipe` → H.264 mp4 with EXACTLY
   `round(duration * fps)` frames.
@@ -66,26 +67,32 @@ Keyed identically to `audio_manifest.json`:
 {
   "<segment_id>": {
     "duration_seconds": 12.84,
-    "source": "whisper",            // or "estimated"
+    "source": "whisper",
     "words": [ {"w": "Clouds", "start": 3.12, "end": 3.55}, ... ]
   }
 }
 ```
 
 - Written by `python -m src.pipeline align <script.json> <run_dir>`.
-- `source: "estimated"` = linear estimate over the narration text (whisper
-  unavailable/failed). Builds NEVER block on alignment.
+- There is NO estimated fallback. If the whisper CLI is unavailable, a wav is
+  missing, or transcription fails, `align` prints an actionable error and
+  exits non-zero. `source` is always `"whisper"`.
 - Staleness: if `alignment.json` is older than a segment's wav, the builder
-  treats that segment as `estimated` and warns (fix-loops regenerate single
-  segments without re-aligning).
+  fails that segment with an error telling the operator to re-run `align`
+  (fix-loops must re-align regenerated audio).
+- TimeRef consequence: a spec using `at_word` requires alignment for that
+  segment; the builder raises a clear error when it is missing.
 
-## 4. CLI no-op semantics (protects every legacy run)
+## 4. CLI exit semantics
 
 `align`, `assets`, and `collage` commands **exit 0 and print
-`{"skipped": true, ...}`** when the run has no collage work (no
-`visual_engine: "collage"` segments and no `scenes/*.collage.json`). The
-Studio producer raises on any non-zero exit and includes these steps
-unconditionally in `full` mode. Discovery helper:
+`{"skipped": true, ...}`** ONLY when the run has no collage work (no
+`visual_engine: "collage"` segments and no `scenes/*.collage.json`) — this
+scoping keeps legacy runs working through the Studio producer, which raises
+on any non-zero exit. When there IS collage work and any part of it fails
+(whisper missing, asset generation error, cutout rejected, spec invalid,
+render failure), the command prints the errors and **exits non-zero** — no
+silent degradation. Discovery helper:
 `src.collage.work.collage_segment_ids(script_path, run_dir, only="")`.
 
 Command argument shapes (registered in `src/pipeline.py` COMMANDS):
@@ -127,6 +134,18 @@ TimeRef resolution order (builder): load spec → override
 `spec.duration_seconds` with the audio manifest's real duration → resolve all
 TimeRefs → emit HTML. Color tokens `$palette.<name>` resolve against the style
 pack; unknown tokens are builder errors listing valid names.
+
+No-fallback rules (builder + timing):
+- `resolve_time` raises ValueError when an `at_word` ref cannot be resolved
+  (no alignment words, or the word/occurrence is absent) — the error names the
+  segment, the word, and the fix (re-run align / correct the spec).
+- A spec using `$palette.*` tokens requires a resolvable style pack
+  (spec.style_pack or the script-level style_pack); none → builder error.
+- Font families named in the pack's `type` tokens must exist as woff2 files in
+  the pack's `fonts/` dir; missing families are builder errors (determinism
+  requires bundled fonts — no system-stack substitution).
+- Cutout extraction has no soft-mask fallback: rembg failure or an
+  out-of-range alpha fraction is a hard per-asset error.
 
 ## 6. Preset fields (UI ⇄ server ⇄ agent)
 

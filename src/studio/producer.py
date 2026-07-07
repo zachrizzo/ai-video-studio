@@ -219,11 +219,18 @@ def _pipeline_steps(
     )
     imagegen_args = base + ["imagegen", str(script_path), str(run_dir)]
     videogen_args = base + ["videogen", str(script_path), str(run_dir)]
+    assets_args = base + ["assets", str(script_path), str(run_dir)]
+    collage_args = base + ["collage", str(script_path), str(run_dir)]
     if segment_ids:
         imagegen_args.append(segment_ids)
         videogen_args.append(segment_ids)
+        assets_args.append(segment_ids)
+        collage_args.append(segment_ids)
     imagegen = ("imagegen", "Generating storyboard images", imagegen_args)
     videogen = ("videogen", "Animating storyboard beats", videogen_args)
+    align = ("align", "Aligning narration words", base + ["align", str(script_path), str(run_dir)])
+    assets = ("assets", "Generating collage assets", assets_args)
+    collage = ("collage", "Rendering collage scenes", collage_args)
     manifest = ("manifest", "Building final manifest", base + ["manifest", str(script_path), str(run_dir)])
     composite = ("composite", "Compositing final video", base + ["composite", str(manifest_path), str(final_path)])
     qa = ("qa", "Running QA", base + ["qa", str(run_dir)])
@@ -233,14 +240,17 @@ def _pipeline_steps(
             storyboard,
             synthesize,
             update_storyboard,
+            align,
             imagegen,
+            assets,
             videogen,
+            collage,
             manifest,
             composite,
             qa,
         ]
     if mode == "videos":
-        return [update_storyboard, videogen, manifest, composite, qa]
+        return [update_storyboard, videogen, collage, manifest, composite, qa]
     if mode == "clips":
         return [update_storyboard, videogen]
     raise ValueError(f"unsupported production mode: {mode}")

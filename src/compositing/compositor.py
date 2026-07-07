@@ -12,7 +12,7 @@ def resolve_segment_video(run_dir: Path, segment_id: str) -> Path | None:
     """Return the best available video for a segment, in priority order:
 
     1. clips/{id}.mp4          (AI/motion clip for "scene" segments)
-    2. scenes/{id}_render/{id}_(html|manim).mp4   (rendered diagram animation)
+    2. scenes/{id}_render/{id}_(collage|html|manim).mp4   (rendered diagram animation)
     3. scenes/{id}_render/{id}_fallback.mp4       (fallback title card)
     else None.
     """
@@ -21,7 +21,8 @@ def resolve_segment_video(run_dir: Path, segment_id: str) -> Path | None:
     if clip.exists():
         return clip
     render_dir = run_dir / "scenes" / f"{segment_id}_render"
-    for suffix in ("html", "manim"):
+    # collage first: it is the more specific deterministic artifact.
+    for suffix in ("collage", "html", "manim"):
         scene = render_dir / f"{segment_id}_{suffix}.mp4"
         if scene.exists():
             return scene

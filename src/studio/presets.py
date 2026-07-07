@@ -46,6 +46,18 @@ DEFAULT_PRESETS = {
         "video_provider": "ltx",
         "narration_style": "Energetic and dramatic. Use exclamations. Build hype. Describe action scenes vividly.",
     },
+    "anthropic_documentary": {
+        "name": "Anthropic Documentary",
+        "description": "Mixed-media collage in Anthropic's design language — archival paintings, torn-paper labels, calm parallax",
+        "style_prompt": "19th century oil painting, muted archival palette, soft natural light, aged canvas texture, cream and terracotta tones",
+        "video_length_minutes": 2,
+        "voice_speaker": "eric",
+        "voice_language": "english",
+        "video_provider": "ltx",
+        "narration_style": "Calm, thoughtful documentary narrator. Measured pacing with deliberate pauses. Curious and precise, like a nature documentary about a mind.",
+        "style_pack": "anthropic_docu",
+        "default_visual_engine": "collage",
+    },
     "dark_horror": {
         "name": "Dark & Horror",
         "description": "Dark atmospheric scenes with eerie narration",

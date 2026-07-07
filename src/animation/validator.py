@@ -12,6 +12,8 @@ def validate(spec: SceneSpec) -> None:
     """Validate generated code. Raises ValidationError if invalid."""
     if spec.visual_engine == "manim":
         _validate_manim(spec.code)
+    elif spec.visual_engine == "collage":
+        _validate_collage(spec.code)
     else:
         _validate_html(spec.code)
 
@@ -68,7 +70,16 @@ def _validate_html(code: str) -> None:
         if "<div" not in code.lower() and "<svg" not in code.lower():
             raise ValidationError("HTML code must contain basic HTML structure or SVG/div elements.")
 
-    # 2. Check for external resource loads
+    # 2. The frame renderer is the only render path — every scene must implement
+    # the deterministic seek contract (docs/collage/CONTRACTS.md §1).
+    if "window.seek" not in code:
+        raise ValidationError(
+            "Scene must implement the deterministic seek contract "
+            "(define window.seek and window.__SCENE__). There is no real-time "
+            "recorder fallback."
+        )
+
+    # 3. Check for external resource loads
     external_patterns = [
         r'src=["\']https?://',
         r'href=["\']https?://(?!fonts\.googleapis)',  # allow Google Fonts
@@ -80,8 +91,46 @@ def _validate_html(code: str) -> None:
         if re.search(pattern, code):
             raise ValidationError(f"External resource load detected (pattern: {pattern}). HTML must be self-contained.")
 
-    # 3. No dangerous JS
+    # 4. No dangerous JS
     dangerous_patterns = [r'\beval\s*\(', r'\bFunction\s*\(']
     for pattern in dangerous_patterns:
         if re.search(pattern, code):
             raise ValidationError(f"Dangerous JavaScript pattern: {pattern}")
+
+
+def _validate_collage(code: str) -> None:
+    """Validate a built collage HTML scene. Stricter than the html branch:
+    the seek contract is required, ALL network access is banned (no Google
+    Fonts exception — fonts are base64-embedded), and every non-deterministic
+    time/random source is banned."""
+    # 1. Seek contract markers.
+    for marker in ("window.seek", "__SCENE__"):
+        if marker not in code:
+            raise ValidationError(
+                f"Collage scene missing required marker {marker!r} — it must "
+                "define window.seek and window.__SCENE__ (the seek contract)."
+            )
+
+    # 2. No network access at all (no Google Fonts exception here).
+    network_patterns = [
+        r'src=["\']https?://',
+        r'href=["\']https?://',
+        r'import\s+.*from\s+["\']https?://',
+        r'\bfetch\s*\(',
+        r'XMLHttpRequest',
+    ]
+    for pattern in network_patterns:
+        if re.search(pattern, code):
+            raise ValidationError(
+                f"Collage HTML must be self-contained; network access detected "
+                f"(pattern: {pattern})."
+            )
+
+    # 3. Determinism: no wall-clock time, no unseeded randomness, no eval.
+    banned = ["Math.random(", "Date.now(", "performance.now(", "eval(", "Function("]
+    for token in banned:
+        if token in code:
+            raise ValidationError(
+                f"Non-deterministic or unsafe construct {token!r} banned in "
+                "collage HTML (every property must be a pure function of t)."
+            )

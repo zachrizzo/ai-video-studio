@@ -276,14 +276,145 @@ def _segment_video_paths(run_dir: Path, segment: Any) -> list[Path]:
             return [beat_clip_path(run_dir, beat) for beat in beats]
 
     segment_id = getattr(segment, "segment_id", "")
+    render_dir = run_dir / "scenes" / f"{segment_id}_render"
     candidates = [
         run_dir / "clips" / f"{segment_id}.mp4",
-        run_dir / "scenes" / f"{segment_id}_render" / f"{segment_id}_html.mp4",
-        run_dir / "scenes" / f"{segment_id}_render" / f"{segment_id}_manim.mp4",
-        run_dir / "scenes" / f"{segment_id}_render" / f"{segment_id}_fallback.mp4",
+        # collage first: the deterministic frame-rendered artifact.
+        render_dir / f"{segment_id}_collage.mp4",
+        render_dir / f"{segment_id}_html.mp4",
+        render_dir / f"{segment_id}_manim.mp4",
+        render_dir / f"{segment_id}_fallback.mp4",
     ]
     path = next((path for path in candidates if path.exists()), None)
     return [path] if path else []
+
+
+def _scene_render_video(run_dir: Path, segment_id: str) -> tuple[Path, str] | None:
+    """Return (path, engine) for a segment's frame-rendered scene, if present.
+
+    Priority mirrors the compositor: collage (the deterministic frame artifact)
+    first, then legacy html/manim renders.
+    """
+    render_dir = run_dir / "scenes" / f"{segment_id}_render"
+    for engine in ("collage", "html", "manim"):
+        candidate = render_dir / f"{segment_id}_{engine}.mp4"
+        if candidate.exists():
+            return candidate, engine
+    return None
+
+
+def _luma_stddev_series(path: Path) -> list[tuple[float, float]]:
+    """Per-frame (pts_time, luma spread) via ffmpeg signalstats.
+
+    ffmpeg's ``signalstats`` filter (6.1) does not expose a per-frame luma
+    standard deviation (``YSTD``); we use the equivalent peak-to-peak luma
+    spread ``YMAX - YMIN`` as the flatness metric. A strictly-uniform frame
+    yields 0; ANY content or grain yields a positive spread. Deliberately near-
+    uniform paper backgrounds (e.g. #F0EEE6 with grain) carry a small amount of
+    luma variance, so they land ABOVE the tiny threshold and are NOT treated as
+    blank.
+    """
+    proc = _run(
+        [
+            "ffmpeg",
+            "-hide_banner",
+            "-nostats",
+            "-i",
+            str(path),
+            "-vf",
+            "signalstats,metadata=print",
+            "-an",
+            "-f",
+            "null",
+            "-",
+        ],
+        timeout=240,
+    )
+    text = (proc.stderr or "") + (proc.stdout or "")
+    times = [float(m) for m in re.findall(r"pts_time:(\d+(?:\.\d+)?)", text)]
+    ymins = [float(m) for m in re.findall(r"lavfi\.signalstats\.YMIN=(\d+(?:\.\d+)?)", text)]
+    ymaxs = [float(m) for m in re.findall(r"lavfi\.signalstats\.YMAX=(\d+(?:\.\d+)?)", text)]
+    n = min(len(times), len(ymins), len(ymaxs))
+    return [(times[i], ymaxs[i] - ymins[i]) for i in range(n)]
+
+
+def _max_blank_run_seconds(series: list[tuple[float, float]], threshold: float) -> float:
+    """Longest run of CONSECUTIVE strictly-uniform (blank) frames, in seconds."""
+    max_run = 0.0
+    run_start: float | None = None
+    for pts_time, spread in series:
+        # Blank ONLY when strictly uniform (below the tiny threshold). Near-
+        # uniform paper with grain has spread >= threshold and never counts.
+        if spread < threshold:
+            if run_start is None:
+                run_start = pts_time
+            max_run = max(max_run, pts_time - run_start)
+        else:
+            run_start = None
+    return max_run
+
+
+def _scene_render_checks(
+    add,
+    config: PipelineConfig,
+    segment: Any,
+    scene_video: Path,
+    engine: str,
+    audio_manifest: dict[str, Any],
+) -> None:
+    """Duration-drift + blank-frame checks for a frame-rendered scene."""
+    seg_id = getattr(segment, "segment_id", "")
+
+    # --- Scene duration drift (CONTRACTS §7) ---
+    video_duration = _ffprobe_duration(scene_video)
+    audio_entry = audio_manifest.get(seg_id) or {}
+    target = float(audio_entry.get("duration_seconds") or 0) or float(
+        getattr(segment, "estimated_duration_seconds", 0) or 0
+    )
+    if video_duration is not None and target > 0:
+        drift = abs(video_duration - target)
+        if drift > config.qa_scene_duration_epsilon:
+            # Frame-rendered collage scenes are deterministic, so any drift is a
+            # real bug (error). Legacy html/manim renders only warn so old runs
+            # are not broken.
+            severity = "error" if engine == "collage" else "warning"
+            add(
+                Check(
+                    "scene.duration_drift",
+                    severity,
+                    "Frame-rendered scene duration drifts from the segment's audio duration.",
+                    seg_id,
+                    str(scene_video),
+                    {
+                        "engine": engine,
+                        "video_seconds": video_duration,
+                        "target_seconds": target,
+                        "drift_seconds": drift,
+                        "epsilon": config.qa_scene_duration_epsilon,
+                    },
+                )
+            )
+
+    # --- Blank-frame check (collage + html scene renders only) ---
+    if engine in ("collage", "html"):
+        series = _luma_stddev_series(scene_video)
+        blank_run = _max_blank_run_seconds(series, config.qa_min_luma_stddev)
+        if blank_run > config.qa_max_blank_seconds:
+            add(
+                Check(
+                    "scene.blank_frames",
+                    "error",
+                    "Frame-rendered scene holds strictly-uniform (blank) frames for too long.",
+                    seg_id,
+                    str(scene_video),
+                    {
+                        "engine": engine,
+                        "blank_seconds": blank_run,
+                        "max_blank_seconds": config.qa_max_blank_seconds,
+                        "luma_stddev_threshold": config.qa_min_luma_stddev,
+                    },
+                )
+            )
 
 
 def _status_for(checks: list[Check]) -> str:
@@ -473,6 +604,14 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
                     )
                 )
 
+        # Frame-rendered scene checks: only for diagram-type segments whose
+        # resolved video is a scenes/{id}_render/{id}_(collage|html|manim).mp4.
+        if seg.visual_type == "diagram":
+            scene_render = _scene_render_video(run_dir, seg_id)
+            if scene_render is not None:
+                scene_video, engine = scene_render
+                _scene_render_checks(add, config, seg, scene_video, engine, audio_manifest)
+
         audio_entry = audio_manifest.get(seg_id)
         if not audio_entry:
             add(Check("audio.segment_missing", "error", "Missing audio manifest entry.", seg_id))
@@ -580,6 +719,10 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
                 )
             )
 
+        # NOTE: freezedetect warnings on deliberate calm holds (>=2.5s static
+        # shots — a paused diagram, a held beat) are EXPECTED and must stay
+        # warnings, never errors. They flag "is this intentional?" for a human,
+        # not a defect.
         freeze_events = _detect_video_events(
             final_video,
             "freezedetect=n=-60dB:d=3",

@@ -13,6 +13,9 @@ from .html_renderer import render_html
 
 console = Console()
 
+# The fallback title card implements the deterministic seek contract
+# (docs/collage/CONTRACTS.md §1) so it renders through the frame renderer like
+# every other scene: opacities are pure functions of t (no CSS keyframes).
 FALLBACK_HTML_TEMPLATE = '''<!DOCTYPE html>
 <html>
 <head>
@@ -26,20 +29,28 @@ FALLBACK_HTML_TEMPLATE = '''<!DOCTYPE html>
         font-family: 'Helvetica Neue', sans-serif;
         overflow: hidden;
     }}
-    h1 {{
-        color: white; font-size: 64px;
-        opacity: 0; animation: fadeIn 2s ease forwards;
-    }}
+    h1 {{ color: white; font-size: 64px; opacity: 0; }}
     p {{
         color: #aaa; font-size: 32px; max-width: 1200px; text-align: center;
-        opacity: 0; animation: fadeIn 2s ease 1s forwards;
+        opacity: 0;
     }}
-    @keyframes fadeIn {{ to {{ opacity: 1; }} }}
 </style>
 </head>
 <body>
-    <h1>{title}</h1>
-    <p>{description}</p>
+    <h1 id="title">{title}</h1>
+    <p id="desc">{description}</p>
+<script>
+    window.__SCENE__ = {{ duration: {duration}, fps: 30 }};
+    function clamp01(x) {{ return Math.max(0, Math.min(1, x)); }}
+    // Title fades in over the first 2s; the description fades in over 2s
+    // starting at t=1s. Pure function of t — correct for arbitrary seeks.
+    window.seek = function (t) {{
+        document.getElementById("title").style.opacity = clamp01(t / 2);
+        document.getElementById("desc").style.opacity = clamp01((t - 1) / 2);
+    }};
+    window.seek(0);
+    window.sceneReady = document.fonts.ready;
+</script>
 </body>
 </html>'''
 
@@ -74,6 +85,10 @@ def validate_and_render(
     if spec.visual_engine == "manim":
         return render_manim(spec, quality_flag, attempt_dir, render_timeout)
     else:
+        # Both "html" and "collage" go through render_html: the collage builder
+        # emits seek-contract HTML written to {segment_id}.html in attempt_dir,
+        # and render_html routes it to the deterministic frame renderer. The
+        # output suffix follows spec.visual_engine (collage -> {id}_collage.mp4).
         return render_html(spec, attempt_dir, resolution, fps, render_timeout)
 
 
@@ -92,6 +107,7 @@ def generate_fallback(
     html_code = FALLBACK_HTML_TEMPLATE.format(
         title=title.replace('"', '&quot;'),
         description=description[:200].replace('"', '&quot;'),
+        duration=duration,
     )
 
     spec = SceneSpec(

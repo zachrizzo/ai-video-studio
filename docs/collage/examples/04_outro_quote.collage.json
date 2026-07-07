@@ -1,0 +1,35 @@
+{
+  "spec_version": 1,
+  "segment_id": "outro_quote",
+  "duration_seconds": 11.0,
+  "fps": 30,
+  "style_pack": "anthropic_docu",
+  "background": "$palette.paper",
+  "camera": [
+    { "time": { "at": 0 }, "x": 0.5, "y": 0.5, "scale": 1.08 },
+    { "time": { "at_frac": 1.0 }, "x": 0.5, "y": 0.5, "scale": 1.0 }
+  ],
+  "assets": [],
+  "elements": [
+    {
+      "id": "quote",
+      "type": "typewriter",
+      "text": "What we cannot build, we do not understand.",
+      "x": 0.16,
+      "y": 0.4,
+      "speed_cps": 14,
+      "font": "serif",
+      "color": "$palette.ink",
+      "enter": { "at_frac": 0.08 }
+    },
+    {
+      "id": "glow",
+      "type": "particles",
+      "style": "biolume",
+      "count": 40,
+      "color": "$palette.accent",
+      "area": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+      "depth": 0.7
+    }
+  ]
+}

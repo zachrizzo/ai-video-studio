@@ -29,6 +29,8 @@ interface ActivePreset {
   voice_speaker: string
   voice_language: string
   video_provider: string
+  style_pack?: string | null
+  default_visual_engine?: string | null
 }
 
 interface ChatPanelProps {

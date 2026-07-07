@@ -1,0 +1,61 @@
+{
+  "spec_version": 1,
+  "segment_id": "cold_open",
+  "duration_seconds": 12.0,
+  "fps": 30,
+  "style_pack": "anthropic_docu",
+  "background": "$palette.paper",
+  "camera": [
+    { "time": { "at": 0 }, "x": 0.5, "y": 0.52, "scale": 1.0 },
+    { "time": { "at_frac": 1.0 }, "x": 0.56, "y": 0.5, "scale": 1.12 }
+  ],
+  "assets": [
+    {
+      "id": "sky",
+      "role": "background",
+      "generate": { "prompt": "pale ivory sky with faint torn-paper clouds, flat documentary illustration", "width": 1920, "height": 1088 }
+    },
+    {
+      "id": "ridgeline",
+      "role": "midground",
+      "generate": { "prompt": "distant terracotta mountain ridge, cut-paper collage, muted", "width": 1920, "height": 1088, "cutout": true }
+    },
+    {
+      "id": "foreground_grass",
+      "role": "subject",
+      "generate": { "prompt": "foreground dry grass silhouette, ink on paper, cutout", "width": 1920, "height": 1088, "cutout": true }
+    }
+  ],
+  "elements": [
+    { "id": "sky_layer", "type": "layer", "asset_id": "sky", "x": 0.5, "y": 0.42, "width": 1.15, "depth": 0.1, "z": 0 },
+    { "id": "ridge_layer", "type": "layer", "asset_id": "ridgeline", "x": 0.5, "y": 0.58, "width": 1.1, "depth": 0.5, "z": 1 },
+    { "id": "grass_layer", "type": "layer", "asset_id": "foreground_grass", "x": 0.5, "y": 0.86, "width": 1.25, "depth": 0.92, "z": 2 },
+    {
+      "id": "label_horizon",
+      "type": "label",
+      "text": "the horizon",
+      "attach": "ridge_layer",
+      "x": 0.12,
+      "y": -0.06,
+      "enter": { "at_word": "horizon" }
+    },
+    {
+      "id": "label_field",
+      "type": "label",
+      "text": "the field",
+      "attach": "grass_layer",
+      "x": -0.15,
+      "y": -0.1,
+      "enter": { "at_word": "field" }
+    },
+    {
+      "id": "dust",
+      "type": "particles",
+      "style": "dust",
+      "count": 80,
+      "color": "$palette.muted",
+      "area": { "x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0 },
+      "depth": 0.6
+    }
+  ]
+}

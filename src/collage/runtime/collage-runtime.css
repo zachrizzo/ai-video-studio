@@ -1,0 +1,196 @@
+/*
+ * Static collage runtime styles — Anthropic documentary look.
+ * Colours that vary per scene (palette tokens, element colours) arrive already
+ * resolved from the builder and are set inline by the runtime JS. The values
+ * here are the fixed structural / aesthetic layer only.
+ */
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+html, body {
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  background: #F0EEE6;
+}
+
+.collage-frame {
+  position: fixed;
+  inset: 0;
+  width: 100vw;
+  height: 100vh;
+  overflow: hidden;
+  background: #F0EEE6;
+}
+
+/* The stage holds every element and receives the camera scale. */
+.collage-stage {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  transform-origin: 50% 50%;
+  will-change: transform;
+}
+
+/* ---- layer ---- */
+.collage-layer {
+  position: absolute;
+  transform-origin: center center;
+  will-change: transform, opacity;
+}
+.collage-layer img {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
+
+/* ---- torn-paper label ---- */
+.collage-label {
+  position: absolute;
+  transform-origin: center center;
+  padding: 6px 14px;
+  font-size: 20px;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  font-variant: small-caps;
+  line-height: 1.1;
+  white-space: nowrap;
+  will-change: transform, opacity;
+}
+.collage-label-torn {
+  background: #F7F5EF;
+  box-shadow: 0 2px 6px rgba(31, 30, 27, 0.18);
+  /* irregular torn-paper edge */
+  clip-path: polygon(
+    1% 8%, 6% 2%, 14% 6%, 26% 1%, 39% 5%, 52% 0%, 66% 6%, 78% 2%,
+    90% 7%, 99% 3%, 98% 40%, 100% 66%, 99% 94%, 90% 98%, 77% 93%,
+    63% 99%, 48% 95%, 34% 100%, 21% 94%, 9% 99%, 2% 92%, 0% 60%, 1% 32%
+  );
+}
+.collage-label-plain {
+  background: transparent;
+}
+.collage-label-mono {
+  background: #F7F5EF;
+  box-shadow: 0 1px 3px rgba(31, 30, 27, 0.14);
+  letter-spacing: 0.06em;
+  text-transform: none;
+  font-variant: normal;
+}
+.collage-label-text { position: relative; z-index: 1; }
+
+/* thin pin line from a pinned label to its attach point */
+.collage-pin {
+  position: absolute;
+  left: 0;
+  top: 50%;
+  height: 1px;
+  background: rgba(31, 30, 27, 0.45);
+  transform-origin: 0 0;
+  z-index: 0;
+}
+
+/* ---- particles ---- */
+.collage-particles {
+  position: absolute;
+  pointer-events: none;
+  will-change: transform;
+}
+.collage-particles canvas { display: block; width: 100%; height: 100%; }
+
+/* ---- split panels ---- */
+.collage-split {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6% 5%;
+}
+.collage-split-horizontal { flex-direction: row; }
+.collage-split-vertical { flex-direction: column; }
+.collage-panel {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 12px;
+  will-change: transform, opacity;
+}
+.collage-panel img {
+  display: block;
+  width: 100%;
+  height: auto;
+  box-shadow: 0 6px 18px rgba(31, 30, 27, 0.16);
+}
+.collage-panel-label {
+  font-size: 18px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #1F1E1B;
+}
+
+/* ---- typewriter ---- */
+.collage-typewriter {
+  position: absolute;
+  transform-origin: left top;
+  font-size: 28px;
+  line-height: 1.5;
+  max-width: 60%;
+  white-space: pre-wrap;
+  will-change: opacity;
+}
+.collage-cursor { display: inline-block; }
+
+.collage-font-serif { }
+.collage-font-sans { }
+.collage-font-mono { }
+
+/* ---- nodegraph ---- */
+.collage-nodegraph {
+  position: absolute;
+  inset: 0;
+  will-change: opacity;
+}
+.collage-ng-svg { width: 100%; height: 100%; display: block; }
+.collage-ng-edge { stroke-width: 2; fill: none; }
+.collage-ng-node { }
+.collage-ng-label {
+  font-size: 20px;
+  letter-spacing: 0.05em;
+  text-anchor: middle;
+}
+
+/* clip-path holder (offscreen SVG defs) */
+.collage-clip-holder {
+  position: absolute;
+  width: 0;
+  height: 0;
+  overflow: hidden;
+}
+
+/* ---- global finish: film grain + vignette ---- */
+.collage-grain {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0.06;
+  mix-blend-mode: multiply;
+  z-index: 9998;
+}
+.collage-grain svg { width: 100%; height: 100%; }
+.collage-vignette {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 9999;
+  background: radial-gradient(
+    ellipse at center,
+    rgba(31, 30, 27, 0) 55%,
+    rgba(31, 30, 27, 0.10) 82%,
+    rgba(31, 30, 27, 0.22) 100%
+  );
+}

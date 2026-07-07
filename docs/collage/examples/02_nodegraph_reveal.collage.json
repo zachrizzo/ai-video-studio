@@ -1,0 +1,49 @@
+{
+  "spec_version": 1,
+  "segment_id": "nodegraph_reveal",
+  "duration_seconds": 14.0,
+  "fps": 30,
+  "style_pack": "anthropic_docu",
+  "background": "$palette.paper",
+  "camera": [
+    { "time": { "at": 0 }, "x": 0.5, "y": 0.5, "scale": 1.0 },
+    { "time": { "at_frac": 1.0 }, "x": 0.48, "y": 0.5, "scale": 1.05 }
+  ],
+  "assets": [
+    {
+      "id": "thinker_portrait",
+      "role": "subject",
+      "generate": { "prompt": "classical profile bust portrait, terracotta ink wash on ivory paper", "width": 1088, "height": 1088 }
+    }
+  ],
+  "elements": [
+    { "id": "portrait", "type": "layer", "asset_id": "thinker_portrait", "x": 0.28, "y": 0.5, "width": 0.42, "depth": 0.3, "z": 0 },
+    {
+      "id": "reveal_mask",
+      "type": "mask",
+      "target": "portrait",
+      "shape": "head_silhouette",
+      "reveal": { "at_frac": 0.05 },
+      "duration": 1.6
+    },
+    {
+      "id": "graph",
+      "type": "nodegraph",
+      "reveal": { "at_word": "connected" },
+      "color": "$palette.ink",
+      "accent": "$palette.accent",
+      "nodes": [
+        { "id": "n_mind", "label": "mind", "x": 0.62, "y": 0.32 },
+        { "id": "n_sense", "label": "sense", "x": 0.82, "y": 0.44 },
+        { "id": "n_memory", "label": "memory", "x": 0.7, "y": 0.66 },
+        { "id": "n_act", "label": "act", "x": 0.9, "y": 0.7 }
+      ],
+      "edges": [
+        ["n_mind", "n_sense"],
+        ["n_mind", "n_memory"],
+        ["n_memory", "n_act"],
+        ["n_sense", "n_act"]
+      ]
+    }
+  ]
+}

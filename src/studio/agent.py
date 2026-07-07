@@ -76,8 +76,33 @@ real media locally — never tell the user you have no video/image model. Availa
   Set env vars PTV_QWEN_TTS_SPEAKER and PTV_QWEN_TTS_LANGUAGE to control voice.
   VISUALS for diagrams:
   write HTML/Manim scene specs and `render`. Final cut: `composite`.
+  HTML diagram scenes must implement the deterministic seek contract
+  (`window.seek(t)` + `window.__SCENE__`, see docs/collage/CONTRACTS.md) — the
+  legacy real-time recorder is gone; scenes without `window.seek` no longer render.
 - STORYBOARD: `uv run python -m src.pipeline storyboard <script.json> <run_dir>`
   writes `<run_dir>/storyboard.json` from the script's visual beats and flags weak pacing.
+- COLLAGE ENGINE: deterministic, code-rendered mixed-media collage scenes — parallax
+  layers, torn-paper labels pinned to narrated words, mask reveals, particles,
+  split-screen panels, typewriter text, node graphs. Use it for documentary/explainer
+  segments where designed motion beats AI video: set the segment's `visual_engine` to
+  "collage" (keep `visual_type` "diagram"). Authoring: write
+  `<run_dir>/scenes/{segment_id}.collage.json` per docs/collage/AUTHORING.md (golden
+  examples in docs/collage/examples/). Assets are FLUX-generated per-asset via the
+  spec's `assets[].generate` (`cutout: true` for foreground figures). Coordinates are
+  normalized 0-1. PREFER `at_word`/`at_frac` TimeRefs over absolute seconds — real
+  narration never matches estimates, so `at_word` pins a label to the spoken word.
+  `align` is REQUIRED before any collage build — `at_word` refs raise an error
+  without it, and there is no estimated fallback. whisper must be installed (the
+  `align` command errors and exits non-zero if the whisper CLI is unavailable).
+  Command order for collage runs: setup → write script.json (+ `style_pack` field) →
+  storyboard → synthesize → align → write collage specs → assets → collage → manifest →
+  composite → qa. Documentary recipe: metaphor cold-open (parallax layers + labels) →
+  technical viz (nodegraph / mask reveal) → split-screen experiment (typewriter) →
+  philosophical outro. Keep every shot ≥2.5s with a calm camera (max scale ~1.15).
+  Commands:
+    `uv run python -m src.pipeline align <script.json> <run_dir>`
+    `uv run python -m src.pipeline assets <script.json> <run_dir> [ids]`
+    `uv run python -m src.pipeline collage <script.json> <run_dir> [ids]`
 
 Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip) or "diagram"
 (HTML/Manim animation). Scene segments need an `image_prompt`, or preferably an
@@ -317,6 +342,24 @@ async def handle_ws(websocket: WebSocket) -> None:
             # Inject preset context so the agent knows the user's chosen style
             preset = msg.get("preset")
             if preset:
+                style_pack = preset.get("style_pack")
+                default_visual_engine = preset.get("default_visual_engine")
+                collage_lines = ""
+                if style_pack:
+                    collage_lines += f"- Style pack: {style_pack}\n"
+                if default_visual_engine:
+                    collage_lines += f"- Default visual engine: {default_visual_engine}\n"
+                if style_pack:
+                    collage_lines += (
+                        f"Set style_pack in script.json to '{style_pack}'. "
+                        f"For collage segments follow docs/collage/AUTHORING.md and run the "
+                        f"align/assets/collage commands between synthesize and manifest.\n"
+                    )
+                if default_visual_engine == "collage":
+                    collage_lines += (
+                        "Default segments to visual_engine 'collage' unless a segment "
+                        "clearly needs manim math or an AI-motion scene.\n"
+                    )
                 preset_ctx = (
                     f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
                     f"- Image style: {preset.get('style_prompt', '')}\n"
@@ -324,6 +367,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                     f"- Target length: {preset.get('video_length_minutes', '?')} minutes\n"
                     f"- Voice: speaker={preset.get('voice_speaker', 'serena')}, language={preset.get('voice_language', 'english')}\n"
                     f"- Video motion: {preset.get('video_provider', 'kenburns')}\n"
+                    f"{collage_lines}"
                     f"IMPORTANT: Use these settings when generating the video. "
                     f"Prefer PTV_VIDEO_PROVIDER=ltx for scene clips so LTX-2.3 animates the storyboard action; use Ken Burns only if explicitly requested or as fallback. "
                     f"Put the image style and narration style into script.json as style_bible and narration_style. "
