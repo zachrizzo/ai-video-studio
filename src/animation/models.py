@@ -5,7 +5,7 @@ from typing import Any, Literal
 
 class SceneSpec(BaseModel):
     segment_id: str
-    visual_engine: Literal["manim", "html"]
+    visual_engine: Literal["manim", "html", "collage"]
     code: str  # generated Python (manim) or HTML code
     target_duration_seconds: float
     narration_text: str  # for context
@@ -17,7 +17,7 @@ class RenderResult(BaseModel):
     segment_id: str
     video_path: Path
     actual_duration_seconds: float
-    visual_engine: Literal["manim", "html"]
+    visual_engine: Literal["manim", "html", "collage"]
     success: bool
     error_message: str | None = None
     attempts: int = 1

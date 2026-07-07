@@ -66,6 +66,22 @@ class PipelineConfig(BaseSettings):
     ltx_anchor_last_frame: bool = True
     ltx_prefer_extend: bool = False
 
+    # Collage engine — cutout extraction (rembg)
+    cutout_model: str = "isnet-general-use"
+    # A cutout is accepted when the fraction of pixels with alpha > 0.5 falls
+    # inside [min, max]; outside that range rembg either removed everything or
+    # nothing, and the soft-radial-mask fallback is used instead.
+    cutout_alpha_min: float = 0.05
+    cutout_alpha_max: float = 0.95
+
+    # Collage engine — style packs
+    style_packs_dir: Path = Path("style_packs")
+
+    # Word-level narration alignment (whisper CLI, same shape as qa_asr_command)
+    align_command: str = "PYENV_VERSION=3.11.13 whisper"
+    align_model: str = "base.en"
+    captions_burn_in: bool = False  # stretch: burn word-level .ass captions
+
     # Release QA gates
     qa_target_lufs: float = -16.0
     qa_min_lufs: float = -20.0
@@ -76,6 +92,12 @@ class PipelineConfig(BaseSettings):
     qa_require_asr: bool = False
     qa_asr_command: str = "PYENV_VERSION=3.11.13 whisper"
     qa_asr_model: str = "base.en"
+    # Frame-rendered scenes must land within this many seconds of target.
+    qa_scene_duration_epsilon: float = 0.25
+    # Blank-frame gate: a frame is "blank" only when strictly uniform
+    # (luma stddev below this); near-uniform paper backgrounds must pass.
+    qa_min_luma_stddev: float = 1.0
+    qa_max_blank_seconds: float = 4.0
 
     # Pipeline Settings
     max_render_attempts: int = 5

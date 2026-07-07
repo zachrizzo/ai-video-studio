@@ -5,7 +5,7 @@ from typing import Literal
 class ConceptClassification(BaseModel):
     name: str
     description: str
-    visual_engine: Literal["manim", "html"]
+    visual_engine: Literal["manim", "html", "collage"]
     importance: int  # 1-5, 5 being most important
     prerequisites: list[str] = []
 
@@ -21,7 +21,7 @@ class PaperAnalysis(BaseModel):
 class AnimationCue(BaseModel):
     timestamp_hint: str  # "at start", "after 3 seconds", "with narration"
     description: str
-    visual_engine: Literal["manim", "html"]
+    visual_engine: Literal["manim", "html", "collage"]
     math_content: str | None = None  # LaTeX if applicable
 
 
@@ -50,7 +50,9 @@ class ScriptSegment(BaseModel):
     narration_text: str
     estimated_duration_seconds: float
     animation_cues: list[AnimationCue]
-    visual_engine: Literal["manim", "html"]
+    # "collage" renders a declarative CollageSpec (scenes/{segment_id}.collage.json)
+    # through the deterministic frame renderer; see docs/collage/CONTRACTS.md.
+    visual_engine: Literal["manim", "html", "collage"]
     transition_type: str = "fade"  # "fade", "slide", "none"
     # Routing for the visual: "diagram" keeps the existing HTML/Manim animation
     # path (maps, timelines, stat reveals); "scene" generates a FLUX still that
@@ -85,3 +87,6 @@ class VideoScript(BaseModel):
     negative_prompt: str | None = None
     pronunciation_dictionary: dict[str, str] = {}
     release_acceptance_criteria: list[str] = []
+    # Name of a directory under style_packs/ whose tokens/fonts/flux prefixes
+    # style every collage scene and FLUX prompt in this script.
+    style_pack: str | None = None

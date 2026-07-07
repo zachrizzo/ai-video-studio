@@ -19,7 +19,6 @@ Commands:
 
 import json
 import sys
-from contextlib import contextmanager
 from pathlib import Path
 
 from rich.console import Console
@@ -29,7 +28,9 @@ console = Console()
 # Cross-process lock so only ONE heavy generation (FLUX image or LTX video) runs
 # at a time. On Apple MPS, concurrent generations cause memory pressure and noisy
 # output. A second generation BLOCKS until the first releases the lock.
-_GEN_LOCK_PATH = "/tmp/video-studio-gen.lock"
+# The implementation lives in src/utils/locks.py so non-CLI modules
+# (src/assets/generate.py) can share it without importing this module.
+from .utils.locks import generation_lock as _generation_lock  # noqa: E402
 
 
 def _probe_media_duration(path: Path) -> float | None:
@@ -110,22 +111,6 @@ def _normalize_audio_file(path: Path, target_lufs: float = -16.0) -> str | None:
     finally:
         if tmp_path.exists():
             tmp_path.unlink(missing_ok=True)
-
-
-@contextmanager
-def _generation_lock():
-    import fcntl
-    lock_file = open(_GEN_LOCK_PATH, "w")
-    try:
-        try:
-            fcntl.flock(lock_file, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            console.print("[yellow]Another generation is running — waiting for it to finish…[/yellow]")
-            fcntl.flock(lock_file, fcntl.LOCK_EX)  # block until free
-        yield
-    finally:
-        fcntl.flock(lock_file, fcntl.LOCK_UN)
-        lock_file.close()
 
 
 def cmd_synthesize(script_json: str, output_dir: str):
@@ -812,6 +797,37 @@ def cmd_setup(base_dir: str):
     }))
 
 
+def cmd_align(script_json: str, run_dir: str):
+    """Word-level narration alignment (whisper) -> <run_dir>/audio/alignment.json.
+
+    Exits 0 printing {"skipped": true} when the run has no collage work, so the
+    Studio producer can include this step unconditionally.
+    """
+    from .alignment.align import run_align
+
+    run_align(Path(script_json), Path(run_dir))
+
+
+def cmd_assets(script_json: str, run_dir: str, segment_ids: str = ""):
+    """Generate CollageSpec assets (FLUX + optional rembg cutouts).
+
+    Exits 0 printing {"skipped": true} when the run has no collage work.
+    """
+    from .assets.generate import run_assets
+
+    run_assets(Path(script_json), Path(run_dir), segment_ids)
+
+
+def cmd_collage(script_json: str, run_dir: str, segment_ids: str = ""):
+    """Build and render collage scenes from scenes/{id}.collage.json specs.
+
+    Exits 0 printing {"skipped": true} when the run has no collage work.
+    """
+    from .collage.cmd import run_collage
+
+    run_collage(Path(script_json), Path(run_dir), segment_ids)
+
+
 COMMANDS = {
     "synthesize": cmd_synthesize,
     "silence": cmd_silence,
@@ -825,6 +841,9 @@ COMMANDS = {
     "composite": cmd_composite,
     "qa": cmd_qa,
     "setup": cmd_setup,
+    "align": cmd_align,
+    "assets": cmd_assets,
+    "collage": cmd_collage,
 }
 
 
