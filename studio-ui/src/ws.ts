@@ -14,6 +14,8 @@ export interface WsAssistantTextMsg {
 
 export interface WsToolUseMsg {
   type: 'tool_use'
+  /** SDK tool_use_id; matches the corresponding tool_result frame. */
+  id?: string
   name: string
   summary: string
   conversation_id?: string
@@ -21,8 +23,12 @@ export interface WsToolUseMsg {
 
 export interface WsToolResultMsg {
   type: 'tool_result'
+  /** SDK tool_use_id; matches the corresponding tool_use frame. */
+  id?: string
   name: string
   ok: boolean
+  /** Short excerpt of the tool error output when ok is false. */
+  error?: string
   conversation_id?: string
 }
 
@@ -36,6 +42,8 @@ export interface WsDoneMsg {
   type: 'done'
   conversation_id?: string
   run_id?: string | null
+  /** True when the turn ended because the user pressed Stop. */
+  stopped?: boolean
 }
 
 export interface WsErrorMsg {
@@ -53,7 +61,12 @@ export type WsInboundMessage =
   | WsDoneMsg
   | WsErrorMsg
 
-export interface WsOutboundMessage {
+export interface WsStopMsg {
+  type: 'stop'
+  conversation_id?: string
+}
+
+export interface WsUserMessage {
   type: 'user_message'
   text: string
   run_id: string | null
@@ -75,6 +88,8 @@ export interface WsOutboundMessage {
     voicebox_profile?: string | null
   } | null
 }
+
+export type WsOutboundMessage = WsUserMessage | WsStopMsg
 
 // ─── ChatWebSocket class ──────────────────────────────────────────────────────
 

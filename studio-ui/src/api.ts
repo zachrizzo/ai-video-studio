@@ -191,6 +191,27 @@ export async function upsertProjectConversation(
   })
 }
 
+export interface ServerToolActivity {
+  name: string
+  summary: string
+  status: 'done' | 'failed'
+}
+
+export interface ServerChatMessage {
+  role: 'user' | 'assistant' | 'error'
+  text: string
+  tools: ServerToolActivity[]
+}
+
+export async function fetchConversationMessages(
+  conversationId: string,
+): Promise<ServerChatMessage[]> {
+  const data = await apiFetch<{ messages: ServerChatMessage[] }>(
+    `/api/conversations/${conversationId}/messages`,
+  )
+  return data.messages
+}
+
 export async function deleteProjectConversation(
   projectId: string,
   conversationId: string,

@@ -1,9 +1,8 @@
 """Video generation presets — stored as JSON on disk."""
 
 import json
-from pathlib import Path
 
-_PRESETS_FILE = Path("/tmp/video-studio-generations/presets.json")
+from src.studio import config
 
 DEFAULT_PRESETS = {
     "stick_figure_history": {
@@ -98,17 +97,19 @@ DEFAULT_PRESETS = {
 
 
 def _load_all() -> dict:
-    if _PRESETS_FILE.exists():
+    presets_file = config.presets_file()
+    if presets_file.exists():
         try:
-            return json.loads(_PRESETS_FILE.read_text())
+            return json.loads(presets_file.read_text())
         except Exception:
             pass
     return {}
 
 
 def _save_all(data: dict) -> None:
-    _PRESETS_FILE.parent.mkdir(parents=True, exist_ok=True)
-    _PRESETS_FILE.write_text(json.dumps(data, indent=2))
+    presets_file = config.presets_file()
+    presets_file.parent.mkdir(parents=True, exist_ok=True)
+    presets_file.write_text(json.dumps(data, indent=2))
 
 
 def list_presets() -> list[dict]:

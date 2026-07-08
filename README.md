@@ -60,6 +60,23 @@ cd studio-ui && npm install && npm run dev   # http://localhost:5173
 
 Then open the app and ask it to make a video.
 
+### Configuration
+
+Backend environment variables (all optional):
+
+- `STUDIO_HOME` — root for durable studio data (default `~/.video-studio`).
+- `STUDIO_GENERATIONS_DIR` — where one-shot generations (Generate tab, chat
+  quick clips) are stored (default `$STUDIO_HOME/generations`).
+- `STUDIO_PRESETS_FILE` — custom presets JSON (default `$STUDIO_HOME/presets.json`).
+- `STUDIO_AGENT_MODEL` — model override for the chat agent (default: the
+  Claude Agent SDK's default model).
+- `STUDIO_RUNS_DIR` — where video runs live and what `/media` serves
+  (default `/tmp/mongol-video`).
+
+Chat transcripts are persisted server-side under `<STUDIO_RUNS_DIR>/chats/`
+(one JSONL file per conversation), so conversations survive a cleared browser
+and can be reloaded from any machine pointing at the same runs directory.
+
 ### Voice with Voicebox (optional, recommended)
 
 The default voice is bundled Qwen3-TTS (local, no setup). For higher-quality

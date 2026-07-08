@@ -23,6 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 from starlette.staticfiles import StaticFiles
 
+from src.studio import config
 from src.studio.runs import _runs_root, get_run, list_runs
 from src.studio.producer import get_run_production_status, start_run_production
 from src.studio.agent import handle_ws
@@ -81,8 +82,7 @@ def _mount_media() -> None:
 _mount_media()
 
 # Mount generations directory for serving generated files
-_GENS_DIR = Path("/tmp/video-studio-generations")
-_GENS_DIR.mkdir(parents=True, exist_ok=True)
+_GENS_DIR = config.generations_dir()
 app.mount(
     "/generations",
     StaticFiles(directory=str(_GENS_DIR), html=False),
@@ -572,6 +572,34 @@ async def api_delete_preset(preset_id: str) -> dict:
 @app.get("/api/style_packs")
 async def api_list_style_packs() -> dict:
     return {"style_packs": list_style_packs()}
+
+
+# ---------------------------------------------------------------------------
+# Capabilities
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/capabilities")
+async def api_capabilities() -> dict:
+    """Which local engines (voicebox, whisper, ffmpeg, mflux, ltx) are available."""
+    from src.studio import capabilities
+
+    return capabilities.probe()
+
+
+# ---------------------------------------------------------------------------
+# Chat transcripts
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/conversations/{conversation_id}/messages")
+async def api_conversation_messages(conversation_id: str) -> dict:
+    """Server-side transcript for one conversation (empty list is a valid 200)."""
+    from src.studio import transcripts
+
+    if not transcripts.is_valid_conversation_id(conversation_id):
+        raise HTTPException(status_code=404, detail="invalid conversation id")
+    return {"messages": transcripts.load_messages(conversation_id)}
 
 
 # ---------------------------------------------------------------------------

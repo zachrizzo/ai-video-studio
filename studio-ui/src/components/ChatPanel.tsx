@@ -2,7 +2,7 @@ import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
 import '../styles/chat-panel.css'
 import { ChatWebSocket } from '../ws'
 import type { WsInboundMessage } from '../ws'
-import { deleteProjectConversation, upsertProjectConversation } from '../api'
+import { deleteProjectConversation, fetchConversationMessages, upsertProjectConversation } from '../api'
 
 // ── Local view models ──────────────────────────────────────────────────────────
 
@@ -13,6 +13,10 @@ interface ToolActivity {
   name: string
   summary: string
   status: ToolStatus
+  /** SDK tool_use_id, used to match tool_result frames to their tool. */
+  toolUseId?: string
+  /** Short error excerpt when the tool failed. */
+  error?: string
 }
 
 interface ChatMessage {
@@ -59,6 +63,14 @@ function SendIcon() {
   return (
     <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
       <path d="M3 10L17 3L10 17L8.5 11.5L3 10Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="5.5" y="5.5" width="9" height="9" rx="1.5" fill="currentColor" />
     </svg>
   )
 }
@@ -172,6 +184,8 @@ function normalizeTool(tool: Partial<ToolActivity>, settleRunning = false): Tool
     name: typeof tool.name === 'string' ? tool.name : 'Tool',
     summary: typeof tool.summary === 'string' ? tool.summary : '',
     status,
+    toolUseId: typeof tool.toolUseId === 'string' ? tool.toolUseId : undefined,
+    error: typeof tool.error === 'string' ? tool.error : undefined,
   }
 }
 
@@ -461,6 +475,32 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
     manualConversationId,
   ])
 
+  // Hydrate the active conversation from the server-side transcript. Local
+  // storage stays the optimistic write path; the server copy only wins when
+  // it has more history (localStorage cleared, or the chat ran in another
+  // browser).
+  useEffect(() => {
+    if (!activeConvoId || busy) return
+    let cancelled = false
+    fetchConversationMessages(activeConvoId)
+      .then((serverMessages) => {
+        if (cancelled || serverMessages.length === 0) return
+        commitConversations(prev => prev.map(c => {
+          if (c.id !== activeConvoId || serverMessages.length <= c.messages.length) return c
+          const messages: ChatMessage[] = serverMessages.map((m) => ({
+            id: nextId(),
+            role: m.role,
+            text: m.text || '',
+            tools: (m.tools || []).map((t) => normalizeTool(t, true)),
+            streaming: false,
+          }))
+          return { ...c, messages }
+        }))
+      })
+      .catch(() => {})
+    return () => { cancelled = true }
+  }, [activeConvoId, busy, commitConversations])
+
   const updateConversationMessages = useCallback((
     conversationId: string,
     mutate: (messages: ChatMessage[]) => ChatMessage[],
@@ -503,27 +543,39 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
           updateAssistantForConversation(targetId, (m) => ({ ...m, text: m.text + msg.text }))
           break
         case 'tool_use':
-          updateAssistantForConversation(targetId, (m) => ({
-            ...m,
-            // Tools run sequentially here: when a new one starts, mark prior
-            // still-running tools as done. Any straggler resolves on 'done'.
-            tools: [
-              ...m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'done' as ToolStatus } : t)),
-              { id: nextId(), name: msg.name, summary: msg.summary, status: 'running' },
-            ],
-          }))
+          updateAssistantForConversation(targetId, (m) => {
+            // With a tool_use_id each tool resolves via its own tool_result, so
+            // parallel tools can stay running. Without one (older backend),
+            // keep the sequential assumption: settle prior running tools.
+            const prior = msg.id
+              ? m.tools
+              : m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'done' as ToolStatus } : t))
+            return {
+              ...m,
+              tools: [
+                ...prior,
+                { id: nextId(), name: msg.name, summary: msg.summary, status: 'running', toolUseId: msg.id },
+              ],
+            }
+          })
           break
         case 'tool_result':
           updateAssistantForConversation(targetId, (m) => {
-            // Mark the last running tool done/failed. Match by name when provided,
-            // otherwise resolve the most recent still-running tool.
+            // Match by tool_use_id when present; otherwise fall back to name /
+            // most recent still-running tool.
             const tools = [...m.tools]
-            for (let i = tools.length - 1; i >= 0; i--) {
-              const nameMatches = !msg.name || tools[i].name === msg.name
-              if (nameMatches && tools[i].status === 'running') {
-                tools[i] = { ...tools[i], status: msg.ok ? 'done' : 'failed' }
-                break
+            let idx = msg.id ? tools.findIndex((t) => t.toolUseId === msg.id && t.status === 'running') : -1
+            if (idx === -1) {
+              for (let i = tools.length - 1; i >= 0; i--) {
+                const nameMatches = !msg.name || tools[i].name === msg.name
+                if (nameMatches && tools[i].status === 'running') {
+                  idx = i
+                  break
+                }
               }
+            }
+            if (idx !== -1) {
+              tools[idx] = { ...tools[idx], status: msg.ok ? 'done' : 'failed', error: msg.error }
             }
             return { ...m, tools }
           })
@@ -642,6 +694,16 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
     })
   }
 
+  // ── Stop the in-flight agent turn ───────────────────────────────────────────
+  function stopTurn() {
+    if (!busy || !wsRef.current) return
+    wsRef.current.send({
+      type: 'stop',
+      conversation_id: inFlightConvoId.current || undefined,
+    })
+    // Stay busy until the backend confirms with a done/error frame.
+  }
+
   function onKeyDown(e: React.KeyboardEvent<HTMLTextAreaElement>) {
     if (e.key === 'Enter' && !e.shiftKey) {
       e.preventDefault()
@@ -751,7 +813,7 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
               {m.tools.length > 0 && (
                 <div className="tool-activities">
                   {m.tools.map((t) => (
-                    <div className={`tool-activity ${t.status}`} key={t.id}>
+                    <div className={`tool-activity ${t.status}`} key={t.id} title={t.error || undefined}>
                       <span className="tool-activity-icon">
                         {t.status === 'running' ? <span className="spinner" /> : t.status === 'done' ? <CheckIcon /> : <FailIcon />}
                       </span>
@@ -785,9 +847,15 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
             disabled={busy}
             rows={1}
           />
-          <button className="send-btn" onClick={send} disabled={busy || !input.trim()} title="Send">
-            <SendIcon />
-          </button>
+          {busy ? (
+            <button className="send-btn is-stop" onClick={stopTurn} title="Stop" aria-label="Stop">
+              <StopIcon />
+            </button>
+          ) : (
+            <button className="send-btn" onClick={send} disabled={!input.trim()} title="Send">
+              <SendIcon />
+            </button>
+          )}
         </div>
         {busy ? (
           <div className="chat-input-hint busy">

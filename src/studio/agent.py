@@ -19,6 +19,8 @@ from typing import Any
 
 from fastapi import WebSocket, WebSocketDisconnect
 
+from src.studio import capabilities, config, transcripts
+
 logger = logging.getLogger(__name__)
 
 # Matches a run id (run_<8+ hex>) inside a command string or file path so the
@@ -27,7 +29,7 @@ _RUN_ID_RE = re.compile(r"run_[0-9a-f]{6,}")
 
 
 def _extract_run_id(tool_input: dict[str, Any]) -> str | None:
-    for key in ("command", "file_path", "path"):
+    for key in ("run_id", "command", "file_path", "path"):
         val = tool_input.get(key)
         if isinstance(val, str):
             m = _RUN_ID_RE.search(val)
@@ -60,143 +62,87 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 # knows this project's REAL local generation capabilities.
 _STUDIO_BRIEF = """
 You are the brain of a local "Video Studio" app on this machine. You CAN generate
-real media locally — never tell the user you have no video/image model. Available:
+real media locally — never tell the user you have no video/image model. Available
+locally: FLUX.1 images, LTX-2.3 image-to-video (Apple Silicon), Qwen3-TTS and
+Voicebox voice, procedural sound effects, and a deterministic collage engine.
+A [capabilities] line below reports which local engines are currently available
+(the capabilities tool re-probes on demand); if one is down or missing, tell the
+user how to enable it instead of pretending it works.
 
-- IMAGES: FLUX.1 (via mflux) — `uv run python -m src.pipeline imagegen <script.json> <run_dir> [ids]`
-- AI VIDEO: real image-to-video via LTX-2.3 (ltx-2-mlx on Apple Silicon) —
-  `uv run python -m src.pipeline videogen <script.json> <run_dir> [ids]`
-  Use PTV_VIDEO_PROVIDER=ltx for generated scene clips by default. The pipeline
-  turns each storyboard beat's action/camera_motion into an LTX motion prompt and
-  anchors both the first frame and a soft final keyframe from the source image for
-  better identity/coherence. Use Ken
-  Burns only when the user explicitly asks for static/pan-only motion or when LTX
-  fails and fallback is needed.
-- VOICE: `uv run python -m src.pipeline synthesize <script.json> <run_dir>/audio`
-  This auto-uses Qwen3-TTS (local, no API key needed). DO NOT use 'silence' — always use 'synthesize'.
-  Set env vars PTV_QWEN_TTS_SPEAKER and PTV_QWEN_TTS_LANGUAGE to control voice.
-  Higher-quality voices come from the Voicebox voice studio (open-source app,
-  voicebox.sh): it must be RUNNING at 127.0.0.1:17493 and its voices are configured
-  as named PROFILES in its UI. Select it with PTV_VOICE_PROVIDER=voicebox and
-  PTV_VOICEBOX_PROFILE=<profile name> before synthesize. There is no silent fallback —
-  if Voicebox is unreachable, tell the user to launch the app rather than switching providers.
-  VISUALS for diagrams:
-  write HTML/Manim scene specs and `render`. Final cut: `composite`.
-  HTML diagram scenes must implement the deterministic seek contract
-  (`window.seek(t)` + `window.__SCENE__`, see docs/collage/CONTRACTS.md) — the
-  legacy real-time recorder is gone; scenes without `window.seek` no longer render.
-- STORYBOARD: `uv run python -m src.pipeline storyboard <script.json> <run_dir>`
-  writes `<run_dir>/storyboard.json` from the script's visual beats and flags weak pacing.
-- COLLAGE ENGINE: deterministic, code-rendered mixed-media collage scenes — parallax
-  layers, torn-paper labels pinned to narrated words, mask reveals, particles,
-  split-screen panels, typewriter text, node graphs. Use it for documentary/explainer
-  segments where designed motion beats AI video: set the segment's `visual_engine` to
-  "collage" (keep `visual_type` "diagram"). Authoring: write
-  `<run_dir>/scenes/{segment_id}.collage.json` per docs/collage/AUTHORING.md (golden
-  examples in docs/collage/examples/). Assets are FLUX-generated per-asset via the
-  spec's `assets[].generate` (`cutout: true` for foreground figures). Coordinates are
-  normalized 0-1. PREFER `at_word`/`at_frac` TimeRefs over absolute seconds — real
-  narration never matches estimates, so `at_word` pins a label to the spoken word.
-  `align` is REQUIRED before any collage build — `at_word` refs raise an error
-  without it, and there is no estimated fallback. whisper must be installed (the
-  `align` command errors and exits non-zero if the whisper CLI is unavailable).
-  Command order for collage runs: setup → write script.json (+ `style_pack` field) →
-  storyboard → synthesize → align → sfx → write collage specs → assets → collage →
-  manifest → composite → qa.
-- SOUND EFFECTS: segments may declare `sfx` cues that get mixed under the narration:
-  `"sfx": [{"sound": "cannon_boom", "at_word": "cannon", "gain_db": -10}]`.
-  Sounds are procedurally synthesized (no downloads): cannon_boom, cannon_distant,
-  musket_volley, war_drums, ocean_waves, fire_crackle, wind_howl, bell_toll.
-  Timing = exactly one of at / at_frac / at_word (+ optional offset); at_word needs
-  `align` to have run first. Keep gains subtle (-18..-8 dB) so narration stays clear.
-  Ambience (ocean_waves, wind_howl, fire_crackle, war_drums) works at_frac 0-0.1;
-  hits (cannon_boom, musket_volley, bell_toll) land best pinned at_word.
-  Run `uv run python -m src.pipeline sfx <script.json> <run_dir>` after align
-  (idempotent; exits 0 "skipped" when no segment declares sfx).
-  Documentary recipe: metaphor cold-open (parallax layers + labels) →
-  technical viz (nodegraph / mask reveal) → split-screen experiment (typewriter) →
-  philosophical outro. Keep every shot ≥2.5s with a calm camera (max scale ~1.15).
-  Commands:
-    `uv run python -m src.pipeline align <script.json> <run_dir>`
-    `uv run python -m src.pipeline sfx <script.json> <run_dir>`
-    `uv run python -m src.pipeline assets <script.json> <run_dir> [ids]`
-    `uv run python -m src.pipeline collage <script.json> <run_dir> [ids]`
+Use the typed studio tools (mcp__studio__*) for ALL pipeline operations — do not
+shell out to the pipeline CLI or curl the REST API. Recommended order for a video:
+  create_run → Write <run_dir>/script.json → storyboard → synthesize → align →
+  sfx → imagegen → videogen → manifest → composite → qa
+(collage segments additionally: write scenes/{segment_id}.collage.json specs, then
+assets → collage between align and manifest).
+- produce_run(run_id, mode, force_video, segment_ids) runs the full resumable
+  production in the background; poll production_status(run_id). Use it when the
+  user asks to continue/resume/finish a run that already has script.json. mode
+  "videos" preserves images and redoes clips onward; "clips" + segment_ids repairs
+  selected clips only.
+- One-shot tools for quick standalone media (no run needed): generate_image,
+  generate_video, retake_video, extend_video, video_hdr, tts. Poll
+  generation_status(gen_id); list_generations shows recent ones. Never refuse a
+  quick clip request or require a PDF — use generate_video or a one-segment run.
+- Discovery: list_runs, get_run(run_id), list_projects.
+- Voice: synthesize defaults to local Qwen3-TTS (speaker/language params). For
+  Voicebox voices pass voice_provider="voicebox" + voicebox_profile=<name>; the
+  Voicebox app (voicebox.sh) must be RUNNING at 127.0.0.1:17493 and there is no
+  silent fallback — if unreachable, tell the user to launch it rather than
+  switching providers. Never generate silent audio.
+- Video: videogen defaults to LTX-2.3 (video_provider="ltx"), which turns each
+  storyboard beat's action/camera_motion into a motion prompt. Use Ken Burns only
+  when the user explicitly wants static/pan-only motion or as an LTX fallback.
 
-Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip) or "diagram"
-(HTML/Manim animation). Scene segments need an `image_prompt`, or preferably an
-ordered `visual_beats` list for pacing.
+Bash stays available for ffprobe/file inspection and the `render` step: HTML/Manim
+diagram scenes still render via `uv run python -m src.pipeline render
+<scene_spec.json> <work_dir>`. HTML scenes must implement the deterministic seek
+contract (`window.seek(t)` + `window.__SCENE__`, see docs/collage/CONTRACTS.md).
+
+Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip; needs an
+`image_prompt`, or preferably an ordered `visual_beats` list) or "diagram"
+(HTML/Manim). For documentary/explainer segments where designed motion beats AI
+video, set `visual_engine` to "collage" (keep `visual_type` "diagram") and author
+`<run_dir>/scenes/{segment_id}.collage.json` per docs/collage/AUTHORING.md (golden
+examples in docs/collage/examples/). Prefer `at_word`/`at_frac` TimeRefs over
+absolute seconds; `at_word` refs REQUIRE align to have run first (whisper must be
+installed — there is no estimated fallback). Segments may declare `sfx` cues mixed
+under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",
+"gain_db": -10}]` — sounds are procedurally synthesized (cannon_boom,
+cannon_distant, musket_volley, war_drums, ocean_waves, fire_crackle, wind_howl,
+bell_toll); keep gains subtle (-18..-8 dB); at_word cues need align first.
 
 PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
 1. Before generating, write a structured `<run_dir>/script.json` that includes:
    subject, canonical_name, audience, style_bible, narration_style,
    historical_constraints, visual_continuity_rules, forbidden_visuals,
-   storyboard_summary, storyboard_rules, negative_prompt, pronunciation_dictionary,
-   release_acceptance_criteria.
-   Each segment should include visual_intent, visual_constraints,
-   negative_prompt, production_notes, acceptance_criteria, and for scene segments
-   `visual_beats`.
-   Visual beats are ordered mini-shots inside one narrated section:
-   [{"beat_id":"b01","description":"...","shot_type":"wide",
-   "composition":"...","action":"...","camera_motion":"slow push-in",
-   "continuity_notes":["..."],"asset_notes":["..."],"image_prompt":"...","weight":1.0}].
-   Use enough visual beats to keep each beat near 2.5-3.5 seconds. Scene segments
-   longer than ~6 seconds usually need 2-4+ visual beats. Use one beat only for very
-   short segments or when the section is a rendered diagram.
-2. Treat the storyboard as a preproduction gate. Before imagegen, run:
-   `uv run python -m src.pipeline storyboard <run_dir>/script.json <run_dir>`
-   Inspect `<run_dir>/storyboard.json`. If it warns about too few beats or weak
-   pacing, revise script.json before generating media.
-3. Make the style bible concrete. If the user selected a preset, apply that style to
-   every image_prompt and continuity rule. If the user asked for a specific historical
-   subject, the script and visuals must use the correct canonical name and era.
+   storyboard_summary, storyboard_rules, negative_prompt,
+   pronunciation_dictionary, release_acceptance_criteria. Each segment should
+   include visual_intent, visual_constraints, negative_prompt, production_notes,
+   acceptance_criteria, and for scene segments `visual_beats` — ordered mini-shots:
+   [{"beat_id":"b01","description":"...","shot_type":"wide","composition":"...",
+   "action":"...","camera_motion":"slow push-in","continuity_notes":["..."],
+   "asset_notes":["..."],"image_prompt":"...","weight":1.0}]. Keep each beat near
+   2.5-3.5 seconds; scene segments longer than ~6 seconds usually need 2-4+ beats.
+2. Treat the storyboard as a preproduction gate: run the storyboard tool before
+   imagegen and revise script.json if it warns about too few beats or weak pacing.
+3. Make the style bible concrete. Apply any selected preset style to every
+   image_prompt and continuity rule; use correct canonical names and eras.
 4. Prefer robust visuals over fragile AI motion. Avoid asking AI video to render
-   readable text, banners with words, hands, detailed fingers, capes, flags, birds,
-   horses, huge crowds, flames, or smoke unless those artifacts are essential. Use
-   diagrams, stills, overlays, or post-composited text for these. For scene beats,
-   write `action` and `camera_motion` so LTX-2.3 brings the still image to life
-   instead of merely panning across it.
-5. Never rely on generated text inside images. If text is needed, render it in
-   HTML/Manim or composite it manually after generation.
-6. After synthesize/imagegen/videogen, run:
-   `uv run python -m src.pipeline manifest <run_dir>/script.json <run_dir>`
-   then composite with the generated `<run_dir>/composite_manifest.json`.
-7. After synthesize/imagegen/videogen/manifest/composite, ALWAYS run:
-   `uv run python -m src.pipeline qa <run_dir>`
-   If QA fails, inspect `<run_dir>/qa_report.json`, regenerate or revise the failing
-   segments, composite again, and rerun QA. Do not call a video finished unless QA
-   passes, or you explicitly tell the user what failed and ask for override.
-8. For voice failures, regenerate the affected audio segment first. Audio duration
-   far longer than the script estimate usually means hallucinated speech.
-9. When editing an existing run, preserve good approved artifacts and regenerate only
-   the failed or requested segments.
-10. When the user asks whether an existing flow is still making a video, or asks to
-   continue/resume/finish an existing flow that already has script.json, use the
-   Studio producer instead of improvising a second production path:
-   `curl -X POST http://127.0.0.1:8787/api/runs/<run_id>/produce`
-   Then inspect `http://127.0.0.1:8787/api/runs/<run_id>/production` for status.
-11. When an existing run already has good images and the user wants better LTX clips
-    or to finish video without redoing photos, use video-only production:
-    `curl -X POST http://127.0.0.1:8787/api/runs/<run_id>/produce -H 'Content-Type: application/json' -d '{"mode":"videos","force_video":true}'`
-    This preserves `<run_dir>/images`. For a selected repair/test clip, use:
-    `curl -X POST http://127.0.0.1:8787/api/runs/<run_id>/produce -H 'Content-Type: application/json' -d '{"mode":"clips","force_video":true,"segment_ids":"seg01_b01"}'`
-
-QUICK CLIP RECIPE — when the user asks for a short standalone clip of something
-(e.g. "make a 5s video of someone dancing"), do NOT refuse and do NOT require a PDF.
-Do this:
-1. `uv run python -m src.pipeline setup /tmp/paper-to-video`  (run lands in the viewer dir)
-2. Write `<run_dir>/script.json` with ONE segment and the production fields above:
-   visual_type "scene",
-   estimated_duration_seconds ~5, a vivid `image_prompt` that DESCRIBES MOTION
-   (e.g. "a person dancing energetically, moving to the beat, dynamic, photorealistic"),
-   visual_engine "html", empty animation_cues, plus title/total_estimated_duration_seconds.
-3. `uv run python -m src.pipeline storyboard <run_dir>/script.json <run_dir>`
-4. `uv run python -m src.pipeline synthesize <run_dir>/script.json <run_dir>/audio`
-5. `uv run python -m src.pipeline imagegen <run_dir>/script.json <run_dir>`
-6. `uv run python -m src.pipeline videogen <run_dir>/script.json <run_dir>`
-7. `uv run python -m src.pipeline manifest <run_dir>/script.json <run_dir>` then
-   `uv run python -m src.pipeline composite <run_dir>/composite_manifest.json output/<name>.mp4`
-8. `uv run python -m src.pipeline qa <run_dir>` and fix failures before presenting it.
-The result auto-appears in the flow viewer. Always use `uv run`. For longer/full videos,
-use the `generate-video` skill which orchestrates the same steps across many segments.
+   readable text, banners with words, hands, detailed fingers, capes, flags,
+   birds, horses, huge crowds, flames, or smoke unless essential — use diagrams,
+   stills, overlays, or post-composited text instead. Never rely on generated
+   text inside images; render text in HTML/Manim or composite it afterward. For
+   scene beats, write `action` and `camera_motion` so LTX-2.3 brings the still
+   image to life instead of merely panning across it.
+5. After videogen run manifest, then composite, then ALWAYS qa. If QA fails,
+   inspect the report (the qa tool returns it), regenerate or revise the failing
+   segments, composite again, and rerun QA. Do not call a video finished unless
+   QA passes, or you explicitly tell the user what failed and ask for override.
+6. For voice failures, regenerate the affected audio segment first. Audio much
+   longer than the script estimate usually means hallucinated speech.
+7. When editing an existing run, preserve good approved artifacts and regenerate
+   only the failed or requested segments.
 """
 
 
@@ -221,6 +167,16 @@ def _tool_summary(name: str, tool_input: dict[str, Any]) -> str:
     return raw[:120]
 
 
+def _stringify_tool_result(content: Any) -> str:
+    """Flatten a ToolResultBlock.content payload to plain text."""
+    if isinstance(content, str):
+        return content
+    try:
+        return json.dumps(content, ensure_ascii=False)
+    except Exception:
+        return str(content)
+
+
 # ---------------------------------------------------------------------------
 # WebSocket handler
 # ---------------------------------------------------------------------------
@@ -240,12 +196,18 @@ async def handle_ws(websocket: WebSocket) -> None:
     active_run_id: str | None = None
     # Queue used to bridge sync hook callbacks → async ws.send_json
     artifact_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+    # Once a send fails the socket is gone; stop trying (avoids log spam from
+    # a turn task that keeps streaming after the client disconnected).
+    conn_state = {"closed": False}
 
     async def _send(msg: dict[str, Any]) -> None:
+        if conn_state["closed"]:
+            return
         try:
             await websocket.send_json(msg)
-        except Exception:
-            pass
+        except Exception as exc:  # noqa: BLE001
+            conn_state["closed"] = True
+            logger.warning("ws send failed: %s", exc)
 
     # -----------------------------------------------------------------------
     # Attempt to import the SDK – errors are caught so the server stays up.
@@ -262,8 +224,11 @@ async def handle_ws(websocket: WebSocket) -> None:
             StreamEvent,
             ToolUseBlock,
             ToolResultBlock,
-            query,
+            UserMessage,
+            ClaudeSDKClient,
         )
+
+        from src.studio.agent_tools import STUDIO_TOOL_NAMES, build_studio_server
 
         sdk_available = True
     except Exception as exc:  # noqa: BLE001
@@ -297,7 +262,7 @@ async def handle_ws(websocket: WebSocket) -> None:
     ) -> dict[str, Any]:
         nonlocal active_run_id
         tool_name: str = hook_input.get("tool_name", "")
-        if tool_name in _ARTIFACT_TOOLS:
+        if tool_name in _ARTIFACT_TOOLS or tool_name.startswith("mcp__studio__"):
             # Prefer a run id parsed from the tool input (catches brand-new runs
             # created mid-conversation); fall back to the viewed run.
             run_id = _extract_run_id(hook_input.get("tool_input", {}) or {})
@@ -326,9 +291,248 @@ async def handle_ws(websocket: WebSocket) -> None:
 
     drain_task = asyncio.create_task(_drain_artifacts())
 
+    # In-process MCP server exposing the typed studio tools (stateless; one
+    # instance per connection is fine).
+    studio_server = build_studio_server()
+    studio_tool_names = [f"mcp__studio__{name}" for name in STUDIO_TOOL_NAMES]
+
     # -----------------------------------------------------------------------
-    # Main message loop
+    # Turn task: owns the full ClaudeSDKClient lifecycle for one agent turn.
+    # Runs as its own asyncio task so the WS receive loop stays free to handle
+    # stop frames; `holder` exposes the live client for interrupt() and carries
+    # the `stopped` flag into the done frame.
     # -----------------------------------------------------------------------
+    async def _run_turn(
+        conversation_id: str,
+        user_text: str,
+        options: Any,
+        holder: dict[str, Any],
+    ) -> None:
+        nonlocal active_run_id
+        runs_before_query = _snapshot_run_scripts()
+        tool_names_by_id: dict[str, str] = {}
+        assistant_chunks: list[str] = []
+        client = ClaudeSDKClient(options)
+        holder["client"] = client
+        error_sent = False
+        try:
+            await client.connect()
+            await client.query(user_text)
+            async for event in client.receive_response():
+                # ---- SystemMessage: capture session_id ----
+                if isinstance(event, SystemMessage):
+                    new_sid = event.data.get("session_id")
+                    if new_sid and new_sid != session_ids_by_conversation.get(conversation_id):
+                        session_ids_by_conversation[conversation_id] = new_sid
+                        # Persist the session id on the project's conversation
+                        # record so the chat can resume from any browser.
+                        convo_project = project_ids_by_conversation.get(conversation_id)
+                        if convo_project:
+                            try:
+                                from src.studio import projects as projects_store
+
+                                projects_store.upsert_conversation(
+                                    convo_project,
+                                    conversation_id,
+                                    claude_session_id=new_sid,
+                                )
+                            except Exception:  # noqa: BLE001
+                                logger.exception("failed to persist conversation session")
+                        await _send(
+                            {
+                                "type": "session",
+                                "session_id": new_sid,
+                                "conversation_id": conversation_id,
+                            }
+                        )
+
+                # ---- StreamEvent: partial content deltas ----
+                elif isinstance(event, StreamEvent):
+                    ev = event.event
+                    ev_type = ev.get("type", "")
+
+                    if ev_type == "content_block_delta":
+                        delta = ev.get("delta", {})
+                        if delta.get("type") == "text_delta":
+                            text = delta.get("text", "")
+                            if text:
+                                assistant_chunks.append(text)
+                                await _send(
+                                    {
+                                        "type": "assistant_text",
+                                        "text": text,
+                                        "conversation_id": conversation_id,
+                                    }
+                                )
+                    # Tool-use events are emitted from AssistantMessage below
+                    # (with full summaries) to avoid duplicate activity lines.
+
+                # ---- AssistantMessage: completed turn ----
+                elif isinstance(event, AssistantMessage):
+                    if event.session_id and event.session_id != session_ids_by_conversation.get(
+                        conversation_id
+                    ):
+                        session_ids_by_conversation[conversation_id] = event.session_id
+                        await _send(
+                            {
+                                "type": "session",
+                                "session_id": event.session_id,
+                                "conversation_id": conversation_id,
+                            }
+                        )
+
+                    for block in event.content:
+                        # TextBlock is skipped: the live text already arrived via
+                        # StreamEvent text_delta; re-sending it would duplicate.
+                        if isinstance(block, ToolUseBlock):
+                            tool_names_by_id[block.id] = block.name
+                            summary = _tool_summary(block.name, block.input)
+                            transcripts.append_event(
+                                conversation_id,
+                                {
+                                    "type": "tool_use",
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "summary": summary,
+                                },
+                            )
+                            await _send(
+                                {
+                                    "type": "tool_use",
+                                    "id": block.id,
+                                    "name": block.name,
+                                    "summary": summary,
+                                    "conversation_id": conversation_id,
+                                }
+                            )
+
+                # ---- UserMessage: carries ToolResultBlocks back from tools ----
+                elif isinstance(event, UserMessage):
+                    content = event.content
+                    if isinstance(content, list):
+                        for block in content:
+                            if not isinstance(block, ToolResultBlock):
+                                continue
+                            frame: dict[str, Any] = {
+                                "type": "tool_result",
+                                "id": block.tool_use_id,
+                                "name": tool_names_by_id.get(block.tool_use_id, ""),
+                                "ok": not bool(block.is_error),
+                                "conversation_id": conversation_id,
+                            }
+                            if block.is_error:
+                                frame["error"] = _stringify_tool_result(block.content)[:200]
+                            transcript_event = {
+                                "type": "tool_result",
+                                "id": block.tool_use_id,
+                                "ok": frame["ok"],
+                            }
+                            if "error" in frame:
+                                transcript_event["error"] = frame["error"]
+                            transcripts.append_event(conversation_id, transcript_event)
+                            await _send(frame)
+
+                # ---- ResultMessage: query finished ----
+                elif isinstance(event, ResultMessage):
+                    if event.session_id and event.session_id != session_ids_by_conversation.get(
+                        conversation_id
+                    ):
+                        session_ids_by_conversation[conversation_id] = event.session_id
+                        await _send(
+                            {
+                                "type": "session",
+                                "session_id": event.session_id,
+                                "conversation_id": conversation_id,
+                            }
+                        )
+                    # Surface turn failures instead of silently ending. A
+                    # user-initiated stop also ends in an error result; skip it.
+                    if event.is_error and not holder.get("stopped"):
+                        message = event.result or f"agent turn failed ({event.subtype})"
+                        transcripts.append_event(
+                            conversation_id, {"type": "error", "message": message}
+                        )
+                        await _send(
+                            {
+                                "type": "error",
+                                "message": message,
+                                "conversation_id": conversation_id,
+                            }
+                        )
+                        error_sent = True
+
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("Error during Claude turn: %s", exc)
+            transcripts.append_event(
+                conversation_id, {"type": "error", "message": str(exc)}
+            )
+            await _send(
+                {
+                    "type": "error",
+                    "message": str(exc),
+                    "conversation_id": conversation_id,
+                }
+            )
+            error_sent = True
+        finally:
+            holder["client"] = None
+            if assistant_chunks:
+                transcripts.append_event(
+                    conversation_id,
+                    {"role": "assistant", "text": "".join(assistant_chunks)},
+                )
+            try:
+                await client.disconnect()
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("client disconnect failed: %s", exc)
+
+        if error_sent:
+            return
+
+        runs_after_query = _snapshot_run_scripts()
+        changed_runs = [
+            (run_id, mtime)
+            for run_id, mtime in runs_after_query.items()
+            if mtime > runs_before_query.get(run_id, 0)
+        ]
+        if changed_runs:
+            changed_runs.sort(key=lambda item: item[1], reverse=True)
+            changed_run_id = changed_runs[0][0]
+            active_run_id = changed_run_id
+            active_run_ids_by_conversation[conversation_id] = changed_run_id
+            # Runs created/touched by this chat belong to the chat's project.
+            convo_project = project_ids_by_conversation.get(conversation_id)
+            if convo_project:
+                try:
+                    from src.studio import projects as projects_store
+
+                    for new_run_id, _ in changed_runs:
+                        if new_run_id not in runs_before_query:
+                            projects_store.assign_run(new_run_id, convo_project)
+                except Exception:  # noqa: BLE001
+                    logger.exception("failed to assign run to project")
+            await _send(
+                {
+                    "type": "artifact_updated",
+                    "run_id": changed_run_id,
+                    "conversation_id": conversation_id,
+                }
+            )
+
+        await _send(
+            {
+                "type": "done",
+                "conversation_id": conversation_id,
+                "run_id": active_run_ids_by_conversation.get(conversation_id),
+                "stopped": bool(holder.get("stopped")),
+            }
+        )
+
+    # -----------------------------------------------------------------------
+    # Main message loop — never blocks on a turn; turns run as tasks.
+    # -----------------------------------------------------------------------
+    current_turn: dict[str, Any] | None = None
+
     try:
         while True:
             try:
@@ -342,13 +546,39 @@ async def handle_ws(websocket: WebSocket) -> None:
                 await _send({"type": "error", "message": "Invalid JSON"})
                 continue
 
-            if msg.get("type") != "user_message":
+            msg_type = msg.get("type")
+            turn_running = current_turn is not None and not current_turn["task"].done()
+
+            if msg_type == "stop":
+                if turn_running:
+                    current_turn["holder"]["stopped"] = True
+                    turn_client = current_turn["holder"].get("client")
+                    if turn_client is not None:
+                        try:
+                            await turn_client.interrupt()
+                        except Exception as exc:  # noqa: BLE001
+                            logger.warning("interrupt failed: %s", exc)
+                continue
+
+            if msg_type != "user_message":
                 continue
 
             conversation_id = str(msg.get("conversation_id") or "default")
+            if turn_running:
+                await _send(
+                    {
+                        "type": "error",
+                        "message": "a turn is already in progress",
+                        "conversation_id": conversation_id,
+                    }
+                )
+                continue
+
             active_conversation_id = conversation_id
-            runs_before_query = _snapshot_run_scripts()
             user_text: str = msg.get("text", "")
+            # Persist the user's original text before project/preset context is
+            # appended below, so transcripts match what they actually typed.
+            transcripts.append_event(conversation_id, {"role": "user", "text": user_text})
             requested_session_id = msg.get("session_id")
             if not isinstance(requested_session_id, str) or not requested_session_id:
                 requested_session_id = session_ids_by_conversation.get(conversation_id)
@@ -414,7 +644,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                     collage_lines += (
                         f"Set style_pack in script.json to '{style_pack}'. "
                         f"For collage segments follow docs/collage/AUTHORING.md and run the "
-                        f"align/assets/collage commands between synthesize and manifest.\n"
+                        f"align/assets/collage tools between synthesize and manifest.\n"
                     )
                 if default_visual_engine == "collage":
                     collage_lines += (
@@ -425,25 +655,25 @@ async def handle_ws(websocket: WebSocket) -> None:
                 if sfx_style:
                     collage_lines += (
                         f"- Sound effects: {sfx_style} Declare `sfx` cues on segments in "
-                        f"script.json and run the `sfx` command after align.\n"
+                        f"script.json and run the sfx tool after align.\n"
                     )
                 # Voice: default is local Qwen3-TTS, but a preset can pin the
                 # Voicebox voice studio (open-source app at 127.0.0.1:17493).
                 if preset.get("tts_provider") == "voicebox":
                     voicebox_profile = preset.get("voicebox_profile", "Narrator")
                     voice_lines = (
-                        f"Use the 'synthesize' command for voice, NOT 'silence'. "
-                        f"This preset uses the Voicebox voice studio: set PTV_VOICE_PROVIDER=voicebox and "
-                        f"PTV_VOICEBOX_PROFILE={voicebox_profile} before running synthesize. "
+                        f"Use the synthesize tool for voice, never silent audio. "
+                        f"This preset uses the Voicebox voice studio: call mcp__studio__synthesize "
+                        f"with voice_provider='voicebox' and voicebox_profile='{voicebox_profile}'. "
                         f"If synthesize fails because Voicebox is unreachable, tell the user to launch the "
                         f"Voicebox app (voicebox.sh) so it is listening at 127.0.0.1:17493 — do NOT silently "
                         f"switch to another TTS provider. "
                     )
                 else:
                     voice_lines = (
-                        f"Use the 'synthesize' command (Qwen3-TTS local) for voice, NOT 'silence'. "
-                        f"Set PTV_QWEN_TTS_SPEAKER={preset.get('voice_speaker', 'serena')} and "
-                        f"PTV_QWEN_TTS_LANGUAGE={preset.get('voice_language', 'english')} before running synthesize. "
+                        f"Use the synthesize tool (Qwen3-TTS local) for voice, never silent audio: "
+                        f"call mcp__studio__synthesize with speaker='{preset.get('voice_speaker', 'serena')}' "
+                        f"and language='{preset.get('voice_language', 'english')}'. "
                     )
                 preset_ctx = (
                     f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
@@ -454,27 +684,29 @@ async def handle_ws(websocket: WebSocket) -> None:
                     f"- Video motion: {preset.get('video_provider', 'kenburns')}\n"
                     f"{collage_lines}"
                     f"IMPORTANT: Use these settings when generating the video. "
-                    f"Prefer PTV_VIDEO_PROVIDER=ltx for scene clips so LTX-2.3 animates the storyboard action; use Ken Burns only if explicitly requested or as fallback. "
+                    f"Call the videogen tool with video_provider='ltx' so LTX-2.3 animates the storyboard action; use Ken Burns only if explicitly requested or as fallback. "
                     f"Put the image style and narration style into script.json as style_bible and narration_style. "
                     f"Prefix ALL segment image_prompt and visual_beats image_prompt values with the style prompt above. "
                     f"For scene segments longer than ~6 seconds, write 2-4 visual_beats with storyboard fields "
                     f"(description, shot_type, composition, action, camera_motion) so LTX can bring each still's action to life and the final video changes visuals every 3-6 seconds. "
                     f"{voice_lines}"
-                    f"Before imagegen, run `uv run python -m src.pipeline storyboard <run_dir>/script.json <run_dir>` and fix storyboard warnings. "
-                    f"After videogen, run `uv run python -m src.pipeline manifest <run_dir>/script.json <run_dir>` before compositing. "
-                    f"After compositing, run `uv run python -m src.pipeline qa <run_dir>` and fix failures.\n"
+                    f"Before imagegen, run the storyboard tool and fix its warnings. "
+                    f"After videogen, run the manifest tool before compositing. "
+                    f"After compositing, run the qa tool and fix failures.\n"
                 )
                 user_text = user_text + preset_ctx
 
             # Build options
             options = ClaudeAgentOptions(
                 cwd=_REPO_ROOT,
+                model=config.agent_model(),
                 system_prompt={
                     "type": "preset",
                     "preset": "claude_code",
-                    "append": _STUDIO_BRIEF,
+                    "append": _STUDIO_BRIEF + "\n" + capabilities.summary_line(),
                 },
                 permission_mode="acceptEdits",
+                mcp_servers={"studio": studio_server},
                 allowed_tools=[
                     "Read",
                     "Write",
@@ -484,11 +716,13 @@ async def handle_ws(websocket: WebSocket) -> None:
                     "Grep",
                     "Task",
                     "Skill",
+                    *studio_tool_names,
                 ],
                 setting_sources=["project"],
                 skills="all",
                 include_partial_messages=True,
                 resume=requested_session_id,
+                stderr=lambda line: logger.debug("agent stderr: %s", line),
                 hooks={
                     "PostToolUse": [
                         HookMatcher(hooks=[_post_tool_use_hook])
@@ -496,154 +730,15 @@ async def handle_ws(websocket: WebSocket) -> None:
                 },
             )
 
-            try:
-                async for event in query(prompt=user_text, options=options):
-                    # ---- SystemMessage: capture session_id ----
-                    if isinstance(event, SystemMessage):
-                        new_sid = event.data.get("session_id")
-                        if new_sid:
-                            session_ids_by_conversation[conversation_id] = new_sid
-                            # Persist the session id on the project's conversation
-                            # record so the chat can resume from any browser.
-                            convo_project = project_ids_by_conversation.get(conversation_id)
-                            if convo_project:
-                                try:
-                                    from src.studio import projects as projects_store
-
-                                    projects_store.upsert_conversation(
-                                        convo_project,
-                                        conversation_id,
-                                        claude_session_id=new_sid,
-                                    )
-                                except Exception:  # noqa: BLE001
-                                    logger.exception("failed to persist conversation session")
-                            await _send(
-                                {
-                                    "type": "session",
-                                    "session_id": new_sid,
-                                    "conversation_id": conversation_id,
-                                }
-                            )
-
-                    # ---- StreamEvent: partial content deltas ----
-                    elif isinstance(event, StreamEvent):
-                        ev = event.event
-                        ev_type = ev.get("type", "")
-
-                        if ev_type == "content_block_delta":
-                            delta = ev.get("delta", {})
-                            if delta.get("type") == "text_delta":
-                                text = delta.get("text", "")
-                                if text:
-                                    await _send(
-                                        {
-                                            "type": "assistant_text",
-                                            "text": text,
-                                            "conversation_id": conversation_id,
-                                        }
-                                    )
-                        # Tool-use events are emitted from AssistantMessage below
-                        # (with full summaries) to avoid duplicate activity lines.
-
-                    # ---- AssistantMessage: completed turn ----
-                    elif isinstance(event, AssistantMessage):
-                        if event.session_id:
-                            session_ids_by_conversation[conversation_id] = event.session_id
-                            await _send(
-                                {
-                                    "type": "session",
-                                    "session_id": event.session_id,
-                                    "conversation_id": conversation_id,
-                                }
-                            )
-
-                        for block in event.content:
-                            # TextBlock is skipped: the live text already arrived via
-                            # StreamEvent text_delta; re-sending it would duplicate.
-                            if isinstance(block, ToolUseBlock):
-                                summary = _tool_summary(block.name, block.input)
-                                await _send(
-                                    {
-                                        "type": "tool_use",
-                                        "name": block.name,
-                                        "summary": summary,
-                                        "conversation_id": conversation_id,
-                                    }
-                                )
-                            elif isinstance(block, ToolResultBlock):
-                                ok = not bool(
-                                    block.is_error if hasattr(block, "is_error") else False
-                                )
-                                # tool_name not stored on ToolResultBlock; use empty string
-                                await _send(
-                                    {
-                                        "type": "tool_result",
-                                        "name": "",
-                                        "ok": ok,
-                                        "conversation_id": conversation_id,
-                                    }
-                                )
-
-                    # ---- ResultMessage: query finished ----
-                    elif isinstance(event, ResultMessage):
-                        if event.session_id:
-                            session_ids_by_conversation[conversation_id] = event.session_id
-                            await _send(
-                                {
-                                    "type": "session",
-                                    "session_id": event.session_id,
-                                    "conversation_id": conversation_id,
-                                }
-                            )
-
-            except Exception as exc:  # noqa: BLE001
-                logger.exception("Error during Claude query: %s", exc)
-                await _send(
-                    {
-                        "type": "error",
-                        "message": str(exc),
-                        "conversation_id": conversation_id,
-                    }
-                )
-                continue
-
-            runs_after_query = _snapshot_run_scripts()
-            changed_runs = [
-                (run_id, mtime)
-                for run_id, mtime in runs_after_query.items()
-                if mtime > runs_before_query.get(run_id, 0)
-            ]
-            if changed_runs:
-                changed_runs.sort(key=lambda item: item[1], reverse=True)
-                changed_run_id = changed_runs[0][0]
-                active_run_id = changed_run_id
-                active_run_ids_by_conversation[conversation_id] = changed_run_id
-                # Runs created/touched by this chat belong to the chat's project.
-                convo_project = project_ids_by_conversation.get(conversation_id)
-                if convo_project:
-                    try:
-                        from src.studio import projects as projects_store
-
-                        for new_run_id, _ in changed_runs:
-                            if new_run_id not in runs_before_query:
-                                projects_store.assign_run(new_run_id, convo_project)
-                    except Exception:  # noqa: BLE001
-                        logger.exception("failed to assign run to project")
-                await _send(
-                    {
-                        "type": "artifact_updated",
-                        "run_id": changed_run_id,
-                        "conversation_id": conversation_id,
-                    }
-                )
-
-            await _send(
-                {
-                    "type": "done",
-                    "conversation_id": conversation_id,
-                    "run_id": active_run_ids_by_conversation.get(conversation_id),
-                }
+            holder: dict[str, Any] = {"client": None, "stopped": False}
+            task = asyncio.create_task(
+                _run_turn(conversation_id, user_text, options, holder)
             )
+            current_turn = {
+                "task": task,
+                "holder": holder,
+                "conversation_id": conversation_id,
+            }
 
     except WebSocketDisconnect:
         pass
@@ -657,6 +752,23 @@ async def handle_ws(websocket: WebSocket) -> None:
             }
         )
     finally:
+        # Tear down any in-flight turn so no CLI subprocess is orphaned.
+        if current_turn is not None and not current_turn["task"].done():
+            conn_state["closed"] = True
+            turn_client = current_turn["holder"].get("client")
+            if turn_client is not None:
+                try:
+                    await turn_client.interrupt()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("interrupt on disconnect failed: %s", exc)
+            try:
+                await asyncio.wait_for(current_turn["task"], timeout=15)
+            except Exception:  # noqa: BLE001
+                current_turn["task"].cancel()
+                try:
+                    await current_turn["task"]
+                except (Exception, asyncio.CancelledError):  # noqa: BLE001
+                    pass
         # Signal the drain task to stop
         await artifact_queue.put(None)
         drain_task.cancel()

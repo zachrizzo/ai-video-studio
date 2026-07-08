@@ -404,6 +404,17 @@
 
 .send-btn svg { width: 17px; height: 17px; }
 
+.send-btn.is-stop {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.send-btn.is-stop:hover:not(:disabled) {
+  background: var(--red);
+  color: var(--bg-base);
+  box-shadow: none;
+}
+
 .chat-input-hint {
   font-size: var(--text-xs);
   color: var(--text-dim);

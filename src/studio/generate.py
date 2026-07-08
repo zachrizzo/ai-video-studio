@@ -16,15 +16,17 @@ import uuid
 from pathlib import Path
 
 from src.config import PipelineConfig
+from src.studio import config
 
 logger = logging.getLogger(__name__)
 
-_GENS_DIR = Path("/tmp/video-studio-generations")
-_GENS_DIR.mkdir(parents=True, exist_ok=True)
+
+def _gens_dir() -> Path:
+    return config.generations_dir()
 
 
 def _gen_path(gen_id: str) -> Path:
-    return _GENS_DIR / gen_id
+    return _gens_dir() / gen_id
 
 
 def _write_status(gen_id: str, data: dict) -> None:
@@ -42,7 +44,7 @@ def get_generation(gen_id: str) -> dict | None:
 
 def list_generations() -> list[dict]:
     gens = []
-    for d in _GENS_DIR.iterdir():
+    for d in _gens_dir().iterdir():
         sf = d / "status.json"
         if sf.exists():
             try:
