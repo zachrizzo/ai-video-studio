@@ -1,6 +1,13 @@
-import { useEffect, useState, useCallback, useRef } from 'react'
+import { Fragment, useEffect, useState, useCallback, useRef } from 'react'
+import '../styles/flow-viewer.css'
 import { fetchRuns, fetchRun, startRunProduction } from '../api'
-import type { RunSummary, RunDetail, StartRunProductionOptions } from '../api'
+import type {
+  RunSummary,
+  RunDetail,
+  RunProductionStatus,
+  RunQA,
+  StartRunProductionOptions,
+} from '../api'
 import { SegmentCard } from './SegmentCard'
 
 interface FlowViewerProps {
@@ -21,6 +28,175 @@ function formatDuration(s: number): string {
   if (m > 0) return `${m}m ${sec}s`
   return `${sec}s`
 }
+
+// ── Pipeline stages ──────────────────────────────────────────────────────────
+// Mirrors the real step order in src/studio/producer.py (_pipeline_steps).
+// Several backend steps are grouped into one plain-language stage so the
+// stepper stays readable.
+
+const STAGE_LABELS: Record<string, string> = {
+  storyboard: 'Storyboard',
+  narration: 'Narration',
+  timing: 'Timing',
+  sound: 'Sound',
+  images: 'Images',
+  animation: 'Animation',
+  assembly: 'Assembly',
+  quality: 'Quality',
+}
+
+const PIPELINE_STEPS: Record<'full' | 'videos' | 'clips', Array<[string, string]>> = {
+  full: [
+    ['storyboard', 'storyboard'],
+    ['synthesize', 'narration'],
+    ['storyboard', 'timing'],
+    ['align', 'timing'],
+    ['sfx', 'sound'],
+    ['imagegen', 'images'],
+    ['assets', 'images'],
+    ['videogen', 'animation'],
+    ['collage', 'animation'],
+    ['manifest', 'assembly'],
+    ['composite', 'assembly'],
+    ['qa', 'quality'],
+  ],
+  videos: [
+    ['storyboard', 'timing'],
+    ['videogen', 'animation'],
+    ['collage', 'animation'],
+    ['manifest', 'assembly'],
+    ['composite', 'assembly'],
+    ['qa', 'quality'],
+  ],
+  clips: [
+    ['storyboard', 'timing'],
+    ['videogen', 'animation'],
+  ],
+}
+
+type StageState = 'pending' | 'active' | 'done' | 'failed'
+
+interface StageView {
+  key: string
+  label: string
+  state: StageState
+}
+
+interface PipelineView {
+  stages: StageView[]
+  stepNumber: number
+  totalSteps: number
+}
+
+/**
+ * Map the backend production status onto the known pipeline. Returns null when
+ * the reported step list doesn't match what we know (e.g. the pipeline changed)
+ * so the caller can fall back to the honest raw status line instead of showing
+ * a made-up stepper.
+ */
+function derivePipeline(production: RunProductionStatus): PipelineView | null {
+  const mode =
+    production.mode === 'videos' || production.mode === 'clips' ? production.mode : 'full'
+  const steps = PIPELINE_STEPS[mode]
+  if (production.total_steps !== steps.length) return null
+
+  let stepIdx: number
+  if (production.status === 'done') {
+    stepIdx = steps.length
+  } else {
+    // Backend sets progress = round(((index - 1) / total) * 100) when a step
+    // starts, so this recovers the zero-based index of the current step.
+    stepIdx = Math.round((production.progress / 100) * steps.length)
+    stepIdx = Math.min(Math.max(stepIdx, 0), steps.length - 1)
+    if (production.step && steps[stepIdx][0] !== production.step) {
+      const byId = steps.findIndex(([id]) => id === production.step)
+      if (byId === -1) return null
+      stepIdx = byId
+    }
+  }
+
+  const broken = production.status === 'failed' || production.status === 'stalled'
+  const stages: StageView[] = []
+  steps.forEach(([, stageKey], i) => {
+    if (stages.length === 0 || stages[stages.length - 1].key !== stageKey) {
+      stages.push({ key: stageKey, label: STAGE_LABELS[stageKey] ?? stageKey, state: 'pending' })
+    }
+    const stage = stages[stages.length - 1]
+    if (i < stepIdx && stage.state === 'pending') stage.state = 'done'
+    if (i === stepIdx) stage.state = broken ? 'failed' : 'active'
+  })
+
+  return { stages, stepNumber: Math.min(stepIdx + 1, steps.length), totalSteps: steps.length }
+}
+
+// ── Production progress strip ────────────────────────────────────────────────
+
+function ProductionProgress({ production }: { production: RunProductionStatus }) {
+  const pipeline = derivePipeline(production)
+  const running = production.status === 'running'
+  const stalled = production.status === 'stalled'
+  const progress = Math.min(Math.max(Math.round(production.progress), 0), 100)
+
+  const note = running
+    ? pipeline
+      ? `Step ${pipeline.stepNumber} of ${pipeline.totalSteps} — ${production.step_label}…`
+      : `${production.step_label}… ${progress}%`
+    : stalled
+      ? 'Production paused before finishing — press Resume to pick up where it left off.'
+      : `Production hit a problem${production.error ? `: ${production.error}` : ''}`
+
+  return (
+    <div className={`production-strip ${production.status}`} role="status">
+      <div className="production-strip-row">
+        {pipeline ? (
+          <div className="stepper production-stepper">
+            {pipeline.stages.map((stage, i) => (
+              <Fragment key={stage.key}>
+                {i > 0 && <span className="stepper-connector" />}
+                <span
+                  className={`stepper-step${stage.state === 'pending' ? '' : ` ${stage.state}`}`}
+                >
+                  <span className="stepper-step-dot" />
+                  {stage.label}
+                </span>
+              </Fragment>
+            ))}
+          </div>
+        ) : (
+          running && <span className="spinner" />
+        )}
+        <span className="production-note" aria-live="polite" title={note}>
+          {note}
+        </span>
+      </div>
+      <div className="production-bar">
+        <div className="production-bar-fill" style={{ width: `${progress}%` }} />
+      </div>
+    </div>
+  )
+}
+
+// ── QA badge helpers ─────────────────────────────────────────────────────────
+
+function qaBadgeTone(status: RunQA['status']): string {
+  if (status === 'passed') return 'badge-success'
+  if (status === 'warning') return 'badge-warning'
+  return 'badge-danger'
+}
+
+function qaBadgeText(qa: RunQA): string {
+  if (qa.status === 'passed') return 'Quality check passed'
+  const parts: string[] = []
+  if (qa.summary.errors > 0) {
+    parts.push(`${qa.summary.errors} error${qa.summary.errors === 1 ? '' : 's'}`)
+  }
+  if (qa.summary.warnings > 0) {
+    parts.push(`${qa.summary.warnings} warning${qa.summary.warnings === 1 ? '' : 's'}`)
+  }
+  return `Quality check — ${parts.join(', ') || qa.status}`
+}
+
+// ── FlowViewer ───────────────────────────────────────────────────────────────
 
 export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChange }: FlowViewerProps) {
   const [runs, setRuns] = useState<RunSummary[]>([])
@@ -181,123 +357,115 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
   )
   const showRerunVideosButton = Boolean(detail && selectedId && hasExistingImages && !isProducing)
   const produceButtonText = isProducing
-    ? (production?.step_label || 'Producing')
+    ? 'Producing…'
     : productionNeedsAction
       ? 'Resume production'
       : 'Produce video'
-  const productionText = production
-    ? production.status === 'running'
-      ? `${Math.round(production.progress)}% · ${production.step_label}`
-      : production.status === 'failed'
-        ? `failed${production.error ? `: ${production.error}` : ''}`
-          : production.status === 'stalled'
-            ? 'stalled · resume needed'
-            : production.status === 'done'
-              ? (production.step_label || 'video ready')
-              : null
-    : null
+  const hasRuns = projectRuns.length > 0
+  const showProductionStrip = Boolean(production && (isProducing || productionNeedsAction))
+  const showDoneBadge = production?.status === 'done' && !detail?.final_video_url
 
   return (
     <div className="flow-viewer">
       {/* Header */}
       <div className="flow-viewer-header">
-        <span className="panel-label">Flow</span>
-
         {loadingRuns ? (
-          <span className="run-status">loading runs…</span>
+          <div className="run-select-skeleton skeleton" aria-hidden="true" />
         ) : runsError ? (
-          <span className="run-status" style={{ color: 'var(--red)' }}>error: {runsError}</span>
-        ) : (
+          <span className="flow-header-error" title={runsError}>
+            Couldn't load videos: {runsError}
+          </span>
+        ) : hasRuns ? (
           <select
-            className="run-selector"
+            className="select run-select"
             value={selectedId ?? ''}
             onChange={handleRunChange}
-            aria-label="Select run"
+            aria-label="Choose a video"
           >
-            {projectRuns.length === 0 && <option value="">No videos in this project yet</option>}
             {projectRuns.map((r) => (
               <option key={r.id} value={r.id}>
                 {r.title || r.id}
               </option>
             ))}
           </select>
+        ) : (
+          <span className="flow-header-title">Production</span>
         )}
 
-        {detail && (
-          <span className="run-status">
-            <em>{doneCount}/{totalCount}</em> segments done
-            {approvedCount > 0 && <> · <em>{approvedCount}</em> approved</>}
+        {detail && totalCount > 0 && (
+          <span className="flow-summary">
+            {doneCount} of {totalCount} scenes ready
+            {approvedCount > 0 && <> · {approvedCount} approved</>}
+            {detail.total_duration_seconds > 0 && (
+              <> · {formatDuration(detail.total_duration_seconds)}</>
+            )}
           </span>
         )}
 
         {detail && (
-          <div className="run-production">
-            {productionText && (
-              <span className={`production-note ${production?.status ?? ''}`}>
-                {productionText}
+          <div className="flow-actions">
+            {produceError && (
+              <span className="flow-error-note" title={produceError}>
+                Couldn't start: {produceError}
               </span>
             )}
-            {produceError && (
-              <span className="production-note failed">start failed: {produceError}</span>
+            {showDoneBadge && (
+              <span className="badge badge-success">{production?.step_label || 'Done'}</span>
             )}
             {(showProduceButton || showRerunVideosButton) && !isProducing && (
               <select
-                className="run-selector"
+                className="select select-compact"
                 value={speed}
                 onChange={(e) => setSpeed(Number(e.target.value))}
                 disabled={produceBusy}
                 aria-label="Final video speed"
                 title="Playback speed of the final video"
               >
-                <option value={0.75}>0.75x</option>
-                <option value={1}>1x</option>
-                <option value={1.25}>1.25x</option>
-                <option value={1.5}>1.5x</option>
-                <option value={1.75}>1.75x</option>
-                <option value={2}>2x</option>
+                <option value={0.75}>0.75×</option>
+                <option value={1}>1×</option>
+                <option value={1.25}>1.25×</option>
+                <option value={1.5}>1.5×</option>
+                <option value={1.75}>1.75×</option>
+                <option value={2}>2×</option>
               </select>
-            )}
-            {showProduceButton && (
-              <button
-                className="produce-btn"
-                onClick={() => handleProduce('full')}
-                disabled={produceBusy || isProducing}
-                title={isProducing ? 'Production is running' : 'Start full video production'}
-              >
-                {(produceBusy || isProducing) && <span className="spinner" />}
-                {produceButtonText}
-              </button>
             )}
             {showRerunVideosButton && (
               <button
-                className="produce-btn secondary"
+                className="btn btn-ghost btn-sm"
                 onClick={() => handleProduce('videos')}
                 disabled={produceBusy || isProducing}
-                title="Regenerate LTX clips from existing images"
+                title="Regenerate the animated clips from the existing images"
               >
                 {produceBusy && <span className="spinner" />}
                 Rerun videos
               </button>
             )}
-            {detail.total_duration_seconds > 0 && (
-              <span className="run-duration">
-                {formatDuration(detail.total_duration_seconds)} total
-              </span>
+            {showProduceButton && (
+              <button
+                className="btn btn-primary btn-sm"
+                onClick={() => handleProduce('full')}
+                disabled={produceBusy || isProducing}
+                title={isProducing ? 'Production is running' : 'Produce the full video from this storyboard'}
+              >
+                {(produceBusy || isProducing) && <span className="spinner" />}
+                {produceButtonText}
+              </button>
             )}
           </div>
         )}
       </div>
 
+      {/* What's happening now */}
+      {showProductionStrip && production && <ProductionProgress production={production} />}
+
       {/* Final video */}
       {detail?.final_video_url && (
         <div className="final-video-wrap">
-          <div className="final-video-label">
-            <span>▶ Final Video</span>
+          <div className="final-video-head">
+            <span className="final-video-title">Final video</span>
             {detail.qa && (
-              <span className={`qa-summary ${detail.qa.status}`}>
-                QA {detail.qa.status}
-                {detail.qa.summary.errors > 0 && ` · ${detail.qa.summary.errors} errors`}
-                {detail.qa.summary.warnings > 0 && ` · ${detail.qa.summary.warnings} warnings`}
+              <span className={`badge ${qaBadgeTone(detail.qa.status)}`}>
+                {qaBadgeText(detail.qa)}
               </span>
             )}
           </div>
@@ -313,18 +481,67 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
       {/* Segments */}
       <div className="segments-list">
         {loadingDetail && (
-          <div className="loading-state">
-            <span className="spinner" />
-            loading segments…
-          </div>
+          <>
+            <div className="segment-skeleton skeleton" />
+            <div className="segment-skeleton skeleton" />
+            <div className="segment-skeleton skeleton" />
+          </>
         )}
 
         {detailError && !loadingDetail && (
-          <div className="error-state">failed to load run: {detailError}</div>
+          <div className="error-state">Couldn't load this video: {detailError}</div>
+        )}
+
+        {!loadingRuns && !runsError && !hasRuns && (
+          <div className="empty-state">
+            <svg
+              className="empty-state-icon"
+              width="40"
+              height="40"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="2.5" y="4.5" width="19" height="15" rx="2" />
+              <path d="M7 4.5v15M17 4.5v15M2.5 9.5H7M2.5 14.5H7M17 9.5h4.5M17 14.5h4.5" />
+            </svg>
+            <div className="empty-state-title">No videos yet</div>
+            <div className="empty-state-desc">
+              Ask Claude in the chat to start a storyboard — your video will appear here as it
+              takes shape.
+            </div>
+          </div>
         )}
 
         {!loadingDetail && !detailError && detail && detail.segments.length === 0 && (
-          <div className="segments-empty">no segments yet</div>
+          <div className="empty-state">
+            <svg
+              className="empty-state-icon"
+              width="40"
+              height="40"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="1.5"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <rect x="3" y="4" width="8" height="6" rx="1" />
+              <rect x="13" y="4" width="8" height="6" rx="1" />
+              <rect x="3" y="14" width="8" height="6" rx="1" />
+              <path d="M13 16h8M13 19h5" />
+            </svg>
+            <div className="empty-state-title">No scenes yet</div>
+            <div className="empty-state-desc">
+              This video doesn't have a storyboard yet — ask Claude in the chat to plan its
+              scenes.
+            </div>
+          </div>
         )}
 
         {!loadingDetail && !detailError && detail &&

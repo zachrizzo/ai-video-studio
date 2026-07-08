@@ -66,10 +66,10 @@ export default function App() {
         </div>
         <span className="topbar-sep" />
         <span className={`topbar-status ${connected ? 'connected' : 'disconnected'}`}>
-          {connected ? '● Claude Code connected' : '○ connecting…'}
+          {connected ? 'Connected' : 'Reconnecting…'}
         </span>
         <span className="topbar-spacer" />
-        <span className="topbar-badge">local · M5 Pro</span>
+        <span className="topbar-badge">Running locally</span>
       </div>
 
       <div style={{ display: activeTab === 'story' ? 'flex' : 'none', flexDirection: 'column', flex: 1, overflow: 'hidden' }}>

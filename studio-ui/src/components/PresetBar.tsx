@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
+import '../styles/preset-project-bar.css'
 
 interface Preset {
   id: string
@@ -26,6 +27,18 @@ interface StylePack {
 const SPEAKERS = ['serena', 'vivian', 'aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'sohee', 'uncle_fu']
 const LANGUAGES = ['auto', 'english', 'chinese', 'japanese', 'korean', 'german', 'french', 'russian', 'portuguese', 'spanish', 'italian']
 const LENGTHS = [0.5, 1, 2, 3, 5, 10]
+
+function formatName(value: string): string {
+  return value
+    .split('_')
+    .map(part => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ')
+}
+
+function formatLength(minutes: number): string {
+  if (minutes < 1) return `${Math.round(minutes * 60)} seconds`
+  return minutes === 1 ? '1 minute' : `${minutes} minutes`
+}
 
 function dedupePresets(items: Preset[]): Preset[] {
   const byId = new Map<string, Preset>()
@@ -110,84 +123,93 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
   return (
     <div className="preset-bar">
       <div className="preset-bar-header" onClick={() => setExpanded(!expanded)}>
-        <div className="preset-bar-left">
-          <span className="preset-bar-icon">{expanded ? '▾' : '▸'}</span>
-          <span className="preset-bar-label">Preset</span>
-          <select
-            className="preset-select"
-            value={activePreset.id}
-            onChange={e => selectPreset(e.target.value)}
-            onClick={e => e.stopPropagation()}
-          >
-            {presets.map(p => (
-              <option key={p.id} value={p.id}>{p.name}</option>
-            ))}
-          </select>
-        </div>
-        <div className="preset-bar-right">
+        <span className="bar-label">Style preset</span>
+        <select
+          className="bar-select"
+          value={activePreset.id}
+          onChange={e => selectPreset(e.target.value)}
+          onClick={e => e.stopPropagation()}
+          aria-label="Style preset"
+        >
+          {presets.map(p => (
+            <option key={p.id} value={p.id}>{p.name}</option>
+          ))}
+        </select>
+        <div className="preset-bar-side">
           <span className="preset-bar-meta">
-            {activePreset.voice_speaker} · {activePreset.voice_language} · {activePreset.video_length_minutes}min
+            {formatName(activePreset.voice_speaker)} · {formatName(activePreset.voice_language)} · {formatLength(activePreset.video_length_minutes)}
           </span>
+          <button type="button" className="btn btn-ghost btn-sm" aria-expanded={expanded}>
+            Customize
+            <svg
+              className={`preset-chevron${expanded ? ' open' : ''}`}
+              width="10" height="6" viewBox="0 0 10 6" aria-hidden="true"
+            >
+              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
+            </svg>
+          </button>
         </div>
       </div>
 
       {expanded && (
         <div className="preset-settings">
-          <div className="preset-row">
-            <label className="preset-field-label">Style Prompt</label>
-            <textarea
-              className="preset-textarea"
-              value={activePreset.style_prompt}
-              onChange={e => updateField('style_prompt', e.target.value)}
-              rows={2}
-              placeholder="Image generation style prefix..."
-            />
+          <div className="preset-settings-prompts">
+            <div className="field">
+              <label className="field-label">Visual style</label>
+              <textarea
+                className="textarea"
+                value={activePreset.style_prompt}
+                onChange={e => updateField('style_prompt', e.target.value)}
+                rows={3}
+                placeholder="How generated images should look — e.g. cinematic watercolor, muted palette…"
+              />
+            </div>
+            <div className="field">
+              <label className="field-label">Narration style</label>
+              <textarea
+                className="textarea"
+                value={activePreset.narration_style}
+                onChange={e => updateField('narration_style', e.target.value)}
+                rows={3}
+                placeholder="How the script should be written — tone, pacing, point of view…"
+              />
+            </div>
           </div>
-          <div className="preset-row">
-            <label className="preset-field-label">Narration Style</label>
-            <textarea
-              className="preset-textarea"
-              value={activePreset.narration_style}
-              onChange={e => updateField('narration_style', e.target.value)}
-              rows={2}
-              placeholder="How the script should be written..."
-            />
-          </div>
-          <div className="preset-grid">
-            <div className="preset-field">
-              <label className="preset-field-label">Voice</label>
+          <div className="preset-settings-grid">
+            <div className="field">
+              <label className="field-label">Voice</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.voice_speaker}
                 onChange={e => updateField('voice_speaker', e.target.value)}
               >
-                {SPEAKERS.map(s => <option key={s} value={s}>{s}</option>)}
+                {SPEAKERS.map(s => <option key={s} value={s}>{formatName(s)}</option>)}
               </select>
             </div>
-            <div className="preset-field">
-              <label className="preset-field-label">Language</label>
+            <div className="field">
+              <label className="field-label">Language</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.voice_language}
                 onChange={e => updateField('voice_language', e.target.value)}
               >
-                {LANGUAGES.map(l => <option key={l} value={l}>{l}</option>)}
+                {LANGUAGES.map(l => <option key={l} value={l}>{formatName(l)}</option>)}
               </select>
             </div>
-            <div className="preset-field">
-              <label className="preset-field-label">Length</label>
+            <div className="field">
+              <label className="field-label">Length</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.video_length_minutes}
                 onChange={e => updateField('video_length_minutes', Number(e.target.value))}
               >
-                {LENGTHS.map(l => <option key={l} value={l}>{l} min</option>)}
+                {LENGTHS.map(l => <option key={l} value={l}>{formatLength(l)}</option>)}
               </select>
             </div>
-            <div className="preset-field">
-              <label className="preset-field-label">Motion</label>
+            <div className="field">
+              <label className="field-label">Motion</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.video_provider}
                 onChange={e => updateField('video_provider', e.target.value)}
               >
@@ -195,34 +217,34 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
                 <option value="kenburns">Ken Burns fallback</option>
               </select>
             </div>
-            <div className="preset-field">
-              <label className="preset-field-label">Style pack</label>
+            <div className="field">
+              <label className="field-label">Style pack</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.style_pack || ''}
                 onChange={e => updateField('style_pack', e.target.value)}
               >
-                <option value="">none</option>
+                <option value="">None</option>
                 {stylePacks.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
               </select>
             </div>
-            <div className="preset-field">
-              <label className="preset-field-label">Engine</label>
+            <div className="field">
+              <label className="field-label">Visual engine</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.default_visual_engine || ''}
                 onChange={e => updateField('default_visual_engine', e.target.value)}
               >
-                <option value="">auto</option>
-                <option value="collage">collage</option>
-                <option value="html">html</option>
-                <option value="manim">manim</option>
+                <option value="">Auto</option>
+                <option value="collage">Collage</option>
+                <option value="html">HTML</option>
+                <option value="manim">Manim</option>
               </select>
             </div>
-            <div className="preset-field">
-              <label className="preset-field-label">Voice provider</label>
+            <div className="field">
+              <label className="field-label">Voice provider</label>
               <select
-                className="preset-select-sm"
+                className="select"
                 value={activePreset.tts_provider || 'qwen'}
                 onChange={e => updateField('tts_provider', e.target.value)}
               >
@@ -232,10 +254,10 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
               </select>
             </div>
             {activePreset.tts_provider === 'voicebox' && (
-              <div className="preset-field">
-                <label className="preset-field-label">Voicebox profile</label>
+              <div className="field">
+                <label className="field-label">Voicebox profile</label>
                 <input
-                  className="preset-save-input"
+                  className="input"
                   value={activePreset.voicebox_profile || ''}
                   onChange={e => updateField('voicebox_profile', e.target.value)}
                   placeholder="Narrator"
@@ -243,28 +265,28 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
               </div>
             )}
           </div>
-          <div className="preset-actions">
+          <div className="preset-settings-footer">
             {saving ? (
               <div className="preset-save-row">
                 <input
-                  className="preset-save-input"
+                  className="input preset-save-input"
                   value={saveName}
                   onChange={e => setSaveName(e.target.value)}
-                  placeholder="Preset name..."
+                  placeholder="Name this preset…"
                   autoFocus
                   onKeyDown={e => e.key === 'Enter' && handleSave()}
                 />
-                <button className="preset-save-btn" onClick={handleSave}>Save</button>
-                <button className="preset-cancel-btn" onClick={() => setSaving(false)}>Cancel</button>
+                <button className="btn btn-primary" onClick={handleSave}>Save</button>
+                <button className="btn btn-ghost" onClick={() => setSaving(false)}>Cancel</button>
               </div>
             ) : (
               <>
-                <button className="preset-save-btn" onClick={() => { setSaving(true); setSaveName(activePreset.name) }}>
-                  Save as Preset
+                <button className="btn btn-secondary" onClick={() => { setSaving(true); setSaveName(activePreset.name) }}>
+                  Save as new preset
                 </button>
                 {!activePreset.builtin && (
-                  <button className="preset-delete-btn" onClick={() => handleDelete(activePreset.id)}>
-                    Delete
+                  <button className="btn btn-danger" onClick={() => handleDelete(activePreset.id)}>
+                    Delete preset
                   </button>
                 )}
               </>

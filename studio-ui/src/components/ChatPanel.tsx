@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useMemo } from 'react'
+import '../styles/chat-panel.css'
 import { ChatWebSocket } from '../ws'
 import type { WsInboundMessage } from '../ws'
 import { deleteProjectConversation, upsertProjectConversation } from '../api'
@@ -62,10 +63,85 @@ function SendIcon() {
   )
 }
 
-function toolGlyph(status: ToolStatus): string {
-  if (status === 'running') return '○' // ○
-  if (status === 'done') return '✓' // ✓
-  return '✗' // ✗
+function HistoryIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M2.5 4.5h11M2.5 8h11M2.5 11.5h7" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function PlusIcon() {
+  return (
+    <svg viewBox="0 0 16 16" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.4" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function CheckIcon() {
+  return (
+    <svg viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M2.5 6.5l2.5 2.5 4.5-5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  )
+}
+
+function FailIcon() {
+  return (
+    <svg viewBox="0 0 12 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M3 3l6 6M9 3l-6 6" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function EmptyChatIcon() {
+  return (
+    <svg width="44" height="44" viewBox="0 0 24 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <rect x="3" y="5" width="18" height="14" rx="2.5" stroke="currentColor" strokeWidth="1.5" />
+      <path d="M10 9.8v4.4c0 .4.45.65.8.43l3.5-2.2a.5.5 0 0 0 0-.86l-3.5-2.2a.5.5 0 0 0-.8.43Z" fill="currentColor" />
+    </svg>
+  )
+}
+
+// ── Friendly tool-activity labels ──────────────────────────────────────────────
+// Raw agent tool names mean nothing to someone making a video; translate them
+// into plain-language, present-tense descriptions.
+
+const TOOL_LABELS: Record<string, string> = {
+  Bash: 'Running a command',
+  BashOutput: 'Checking command output',
+  KillShell: 'Stopping a command',
+  Read: 'Reading a file',
+  Write: 'Writing a file',
+  Edit: 'Editing code',
+  MultiEdit: 'Editing code',
+  NotebookEdit: 'Editing a notebook',
+  Grep: 'Searching the project',
+  Glob: 'Looking for files',
+  LS: 'Browsing folders',
+  WebFetch: 'Searching the web',
+  WebSearch: 'Searching the web',
+  Agent: 'Delegating to a helper',
+  Task: 'Delegating to a helper',
+  TaskCreate: 'Updating the task list',
+  TaskUpdate: 'Updating the task list',
+  TodoWrite: 'Updating the task list',
+  TaskList: 'Checking the task list',
+  TaskGet: 'Checking the task list',
+  Skill: 'Using a skill',
+}
+
+function friendlyToolLabel(rawName: string): string {
+  const mapped = TOOL_LABELS[rawName]
+  if (mapped) return mapped
+  const base = rawName.startsWith('mcp__') ? rawName.split('__').pop() || rawName : rawName
+  const spaced = base
+    .replace(/[_-]+/g, ' ')
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .trim()
+  if (!spaced) return 'Working on a step'
+  return spaced.charAt(0).toUpperCase() + spaced.slice(1)
 }
 
 // ── Component ─────────────────────────────────────────────────────────────────
@@ -573,85 +649,128 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
     }
   }
 
+  const linkedRunId = activeConversation?.runId || currentRunId
+
   return (
     <div className="chat-panel">
       <div className="chat-panel-header">
-        <button className="chat-history-btn" onClick={() => setShowHistory(!showHistory)} title="Chat history">
-          ☰
+        <button
+          className="chat-icon-btn"
+          onClick={() => setShowHistory(!showHistory)}
+          title="Chat history"
+          aria-label="Chat history"
+        >
+          <HistoryIcon />
         </button>
-        <span className="panel-label">Chat — Claude Code</span>
-        <span className="chat-flow-badge">
-          {(activeConversation?.runId || currentRunId)
-            ? (activeConversation?.runId || currentRunId || '').replace(/^run_/, 'flow ')
-            : 'new chat'}
+        <span className="chat-panel-title">Chat</span>
+        <span className={`chat-flow-badge${linkedRunId ? '' : ' is-new'}`}>
+          {linkedRunId ? linkedRunId.replace(/^run_/, 'flow ') : 'new chat'}
         </span>
-        <button className="chat-new-btn" onClick={newConversation} title="New chat">+</button>
+        <button
+          className="chat-icon-btn chat-new-btn"
+          onClick={newConversation}
+          title="New chat"
+          aria-label="New chat"
+        >
+          <PlusIcon />
+        </button>
       </div>
 
       {showHistory && (
         <div className="chat-history-list">
           {visibleConversations.length === 0 && (
-            <div className="chat-history-empty">No conversations in this project yet</div>
-          )}
-          {visibleConversations.map(c => (
-            <div
-              key={c.id}
-              className={`chat-history-item ${c.id === activeConvoId ? 'active' : ''}`}
-              onClick={() => switchConversation(c.id)}
-            >
-              <span className="chat-history-title">{c.title}</span>
-              {c.runId && <span className="chat-history-flow">{c.runId.replace(/^run_/, 'flow ')}</span>}
-              <span className="chat-history-count">{c.messages.filter(m => m.role === 'user').length} msgs</span>
-              <button
-                className="chat-history-delete"
-                onClick={e => { e.stopPropagation(); deleteConversation(c.id) }}
-              >×</button>
+            <div className="chat-history-empty">
+              No conversations in this project yet.<br />
+              Send a message below to start one.
             </div>
-          ))}
+          )}
+          {visibleConversations.map(c => {
+            const count = c.messages.filter(m => m.role === 'user').length
+            return (
+              <div
+                key={c.id}
+                className={`chat-history-item ${c.id === activeConvoId ? 'active' : ''}`}
+                onClick={() => switchConversation(c.id)}
+              >
+                <span className="chat-history-title">{c.title}</span>
+                {c.runId && <span className="chat-history-flow">{c.runId.replace(/^run_/, 'flow ')}</span>}
+                <span className="chat-history-count">{count} {count === 1 ? 'message' : 'messages'}</span>
+                <button
+                  className="chat-history-delete"
+                  title="Delete conversation"
+                  onClick={e => { e.stopPropagation(); deleteConversation(c.id) }}
+                >×</button>
+              </div>
+            )
+          })}
         </div>
       )}
 
       <div className="chat-messages">
         {messages.length === 0 && (
-          <div className="segments-empty">
-            {currentRunId
-              ? (
-                <>
-                  No chat yet for this flow.<br />
-                  Send a message to start, or open history.
-                </>
-              )
-              : (
-                <>
-                  Ask Claude Code to make a video.<br />
-                  e.g. "make a video about the fall of Rome"
-                </>
-              )}
+          <div className="empty-state">
+            <div className="empty-state-icon"><EmptyChatIcon /></div>
+            {currentRunId ? (
+              <>
+                <div className="empty-state-title">No chat for this flow yet</div>
+                <div className="empty-state-desc">
+                  Send a message below to keep working on it, or open a past conversation from the history button above.
+                </div>
+              </>
+            ) : (
+              <>
+                <div className="empty-state-title">Make something new</div>
+                <div className="empty-state-desc">
+                  Describe the video you want — try “Make a video about the fall of Rome.”
+                </div>
+              </>
+            )}
           </div>
         )}
 
-        {messages.map((m) => (
-          <div className={`msg-row ${m.role}`} key={m.id}>
-            <span className="msg-role-label">{m.role === 'user' ? 'You' : m.role === 'error' ? 'Error' : 'Claude'}</span>
-            {(m.text || m.role !== 'assistant' || m.tools.length === 0) && (
-              <div className={`msg-bubble ${m.role}`}>
-                {m.text}
-                {m.streaming && <span className="msg-cursor" />}
-              </div>
-            )}
-            {m.tools.length > 0 && (
-              <div className="tool-activities">
-                {m.tools.map((t) => (
-                  <div className={`tool-activity ${t.status}`} key={t.id}>
-                    <span className="tool-activity-icon">{toolGlyph(t.status)}</span>
-                    <span className="tool-activity-name">{t.name}</span>
-                    <span className="tool-activity-summary">{t.summary}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ))}
+        {messages.map((m) => {
+          const hasRunningTool = m.tools.some((t) => t.status === 'running')
+          const showThinkingBubble = m.role === 'assistant' && m.streaming && !m.text && m.tools.length === 0
+          const showBubble = !showThinkingBubble && (Boolean(m.text) || m.role !== 'assistant' || m.tools.length === 0)
+          const showTrailingThinking = m.role === 'assistant' && m.streaming && !m.text && m.tools.length > 0 && !hasRunningTool
+          return (
+            <div className={`msg-row ${m.role}`} key={m.id}>
+              <span className="msg-role-label">{m.role === 'user' ? 'You' : m.role === 'error' ? 'Error' : 'Claude'}</span>
+              {showBubble && (
+                <div className={`msg-bubble ${m.role}`}>
+                  {m.text}
+                  {m.streaming && <span className="msg-cursor" />}
+                </div>
+              )}
+              {showThinkingBubble && (
+                <div className="msg-thinking">
+                  <span className="msg-thinking-dots"><span /><span /><span /></span>
+                  Thinking it through…
+                </div>
+              )}
+              {m.tools.length > 0 && (
+                <div className="tool-activities">
+                  {m.tools.map((t) => (
+                    <div className={`tool-activity ${t.status}`} key={t.id}>
+                      <span className="tool-activity-icon">
+                        {t.status === 'running' ? <span className="spinner" /> : t.status === 'done' ? <CheckIcon /> : <FailIcon />}
+                      </span>
+                      <span className="tool-activity-label">{friendlyToolLabel(t.name)}</span>
+                      {t.status === 'failed' && <span className="tool-activity-flag">didn’t work</span>}
+                      {t.summary && <span className="tool-activity-summary">{t.summary}</span>}
+                    </div>
+                  ))}
+                  {showTrailingThinking && (
+                    <div className="tool-activity running">
+                      <span className="tool-activity-icon"><span className="spinner" /></span>
+                      <span className="tool-activity-label">Thinking about the next step…</span>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )
+        })}
         <div ref={messagesEndRef} />
       </div>
 
@@ -659,7 +778,7 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
         <div className="chat-input-row">
           <textarea
             className="chat-textarea"
-            placeholder="Ask Claude Code to make or change a video…"
+            placeholder="Ask Claude to make or change a video…"
             value={input}
             onChange={(e) => setInput(e.target.value)}
             onKeyDown={onKeyDown}
@@ -670,9 +789,14 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
             <SendIcon />
           </button>
         </div>
-        <div className="chat-input-hint">
-          {busy ? 'Claude is working…' : 'Enter to send · Shift+Enter for newline'}
-        </div>
+        {busy ? (
+          <div className="chat-input-hint busy">
+            <span className="spinner" />
+            Claude is working — follow the steps above
+          </div>
+        ) : (
+          <div className="chat-input-hint">Enter to send · Shift+Enter for a new line</div>
+        )}
       </div>
     </div>
   )

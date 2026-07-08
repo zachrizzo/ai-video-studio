@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { createProject, deleteProject, fetchProjects, renameProject } from '../api'
 import type { Project } from '../api'
+import '../styles/preset-project-bar.css'
 
 const PROJECT_STORAGE_KEY = 'vs_current_project'
 
@@ -23,13 +24,13 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
   const currentIdRef = useRef(currentId)
   useEffect(() => { currentIdRef.current = currentId }, [currentId])
 
-  const load = useCallback(async () => {
-    const requestedId = currentId
+  const load = useCallback(async (overrideId?: string) => {
+    const requestedId = overrideId ?? currentId
     try {
       const list = await fetchProjects()
       setProjects(list)
-      const found = list.find(p => p.id === currentId) || list[0] || null
-      if (found && found.id !== currentId) setCurrentId(found.id)
+      const found = list.find(p => p.id === requestedId) || list[0] || null
+      if (found && found.id !== requestedId) setCurrentId(found.id)
       if (currentIdRef.current === requestedId) onProjectChange(found)
     } catch {
       if (currentIdRef.current === requestedId) onProjectChange(null)
@@ -80,18 +81,20 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
     if (!window.confirm(`Delete project "${current.name}"? Its videos move to ${projects[0]?.name || 'the default project'}.`)) return
     try {
       await deleteProject(current.id)
+      currentIdRef.current = 'default'
       setCurrentId('default')
-      await load()
+      await load('default')
     } catch { /* ignore */ }
   }, [current, load, projects])
 
   return (
     <div className="project-bar">
-      <span className="project-bar-label">Project</span>
+      <span className="bar-label">Project</span>
       <select
-        className="project-select"
+        className="bar-select"
         value={currentId}
         onChange={e => handleSelect(e.target.value)}
+        aria-label="Project"
       >
         {projects.map(p => (
           <option key={p.id} value={p.id}>
@@ -103,7 +106,7 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
       {creating ? (
         <span className="project-bar-edit">
           <input
-            className="project-name-input"
+            className="input bar-input"
             autoFocus
             placeholder="Project name…"
             value={newName}
@@ -113,13 +116,13 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
               if (e.key === 'Escape') { setCreating(false); setNewName('') }
             }}
           />
-          <button className="project-bar-btn" onClick={handleCreate} disabled={!newName.trim()}>Create</button>
-          <button className="project-bar-btn" onClick={() => { setCreating(false); setNewName('') }}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleCreate} disabled={!newName.trim()}>Create</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => { setCreating(false); setNewName('') }}>Cancel</button>
         </span>
       ) : renaming ? (
         <span className="project-bar-edit">
           <input
-            className="project-name-input"
+            className="input bar-input"
             autoFocus
             value={renameValue}
             onChange={e => setRenameValue(e.target.value)}
@@ -128,21 +131,21 @@ export function ProjectBar({ onProjectChange, refreshToken }: ProjectBarProps) {
               if (e.key === 'Escape') setRenaming(false)
             }}
           />
-          <button className="project-bar-btn" onClick={handleRename} disabled={!renameValue.trim()}>Rename</button>
-          <button className="project-bar-btn" onClick={() => setRenaming(false)}>Cancel</button>
+          <button className="btn btn-primary btn-sm" onClick={handleRename} disabled={!renameValue.trim()}>Rename</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setRenaming(false)}>Cancel</button>
         </span>
       ) : (
         <span className="project-bar-actions">
-          <button className="project-bar-btn" onClick={() => setCreating(true)} title="New project">+ New project</button>
+          <button className="btn btn-ghost btn-sm" onClick={() => setCreating(true)} title="Create a new project">+ New project</button>
           {current && (
             <button
-              className="project-bar-btn"
+              className="btn btn-ghost btn-sm"
               onClick={() => { setRenaming(true); setRenameValue(current.name) }}
-              title="Rename project"
+              title="Rename this project"
             >Rename</button>
           )}
           {current && current.id !== 'default' && (
-            <button className="project-bar-btn danger" onClick={handleDelete} title="Delete project">Delete</button>
+            <button className="btn btn-ghost btn-sm bar-btn-danger" onClick={handleDelete} title="Delete this project">Delete</button>
           )}
         </span>
       )}

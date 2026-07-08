@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import '../styles/generate-panel.css'
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
 
@@ -37,6 +38,13 @@ const MODES: { key: GenMode; label: string; icon: React.ReactNode }[] = [
   { key: 'retake', label: 'Retake Video', icon: <RetakeIcon /> },
   { key: 'extend', label: 'Extend Video', icon: <ExtendIcon /> },
   { key: 'video-hdr', label: 'Video to HDR', icon: <HdrIcon /> },
+]
+
+const CREATE_MODE_KEYS: GenMode[] = ['text-to-image', 'text-to-speech', 'text-to-video', 'image-to-video', 'audio-to-video']
+
+const SIDEBAR_GROUPS = [
+  { title: 'Create', modes: MODES.filter(m => CREATE_MODE_KEYS.includes(m.key)) },
+  { title: 'Edit', modes: MODES.filter(m => !CREATE_MODE_KEYS.includes(m.key)) },
 ]
 
 const LOCAL_MODES: GenMode[] = ['text-to-image', 'text-to-speech', 'text-to-video', 'image-to-video', 'audio-to-video', 'retake', 'extend']
@@ -141,7 +149,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         if (gen.status === 'done' || gen.status === 'failed') {
           window.clearInterval(interval)
           pollRef.current.delete(genId)
-          setGenerating(false)
+          if (pollRef.current.size === 0) setGenerating(false)
           if (gen.status === 'done') setSelectedGen(gen)
         }
       } catch { /* retry next tick */ }
@@ -216,7 +224,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     }
     setGenerations(prev => prev.filter(g => g.id !== genId))
     if (selectedGen?.id === genId) setSelectedGen(null)
-    setGenerating(false)
+    if (pollRef.current.size === 0) setGenerating(false)
   }, [selectedGen])
 
   // Clear form
@@ -410,16 +418,21 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     <div className="gen-panel" style={style}>
       {/* ── Sidebar ── */}
       <nav className="gen-sidebar">
-        <div className="gen-sidebar-title">Modes</div>
-        {MODES.map(m => (
-          <button
-            key={m.key}
-            className={`gen-sidebar-item ${mode === m.key ? 'active' : ''}`}
-            onClick={() => setMode(m.key)}
-          >
-            <span className="gen-sidebar-icon">{m.icon}</span>
-            <span className="gen-sidebar-label">{m.label}</span>
-          </button>
+        {SIDEBAR_GROUPS.map(group => (
+          <div className="gen-sidebar-group" key={group.title}>
+            <div className="gen-sidebar-title">{group.title}</div>
+            {group.modes.map(m => (
+              <button
+                key={m.key}
+                className={`gen-sidebar-item ${mode === m.key ? 'active' : ''}`}
+                onClick={() => setMode(m.key)}
+              >
+                <span className="gen-sidebar-icon">{m.icon}</span>
+                <span className="gen-sidebar-label">{m.label}</span>
+                {!LOCAL_MODES.includes(m.key) && <span className="gen-sidebar-cloud">Cloud</span>}
+              </button>
+            ))}
+          </div>
         ))}
       </nav>
 
@@ -432,40 +445,50 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
 
         <div className="gen-form-scroll">
           {/* Backend selector */}
-          <FormField label="Backend">
-            <div className="gen-toggle-group">
-              <button
-                className={`gen-toggle-btn ${backend === 'local' ? 'active' : ''}`}
-                onClick={() => setBackend('local')}
-              >
-                Local
-              </button>
-              <button
-                className={`gen-toggle-btn ${backend === 'cloud' ? 'active' : ''}`}
-                onClick={() => setBackend('cloud')}
-              >
-                Cloud (API)
-              </button>
+          <div className="gen-backend">
+            <div className="gen-backend-row">
+              <span className="field-label">Run on</span>
+              <div className="gen-toggle-group">
+                <button
+                  className={`gen-toggle-btn ${backend === 'local' ? 'active' : ''}`}
+                  onClick={() => setBackend('local')}
+                >
+                  Local
+                </button>
+                <button
+                  className={`gen-toggle-btn ${backend === 'cloud' ? 'active' : ''}`}
+                  onClick={() => setBackend('cloud')}
+                >
+                  Cloud API
+                </button>
+              </div>
             </div>
-          </FormField>
+            {backend === 'cloud' && (
+              <div className="field">
+                <label className="field-label">API key</label>
+                <input
+                  type="password"
+                  className="input gen-mono"
+                  value={apiKey}
+                  onChange={e => setApiKey(e.target.value)}
+                  placeholder="Paste your LTX Cloud API key"
+                />
+              </div>
+            )}
+          </div>
 
-          {needsApiKey && (
-            <FormField label="API Key">
-              <input
-                type="password"
-                className="gen-input"
-                value={apiKey}
-                onChange={e => setApiKey(e.target.value)}
-                placeholder="Enter your LTX Cloud API key..."
-              />
-            </FormField>
-          )}
+          <hr className="divider" />
 
           {isLocalUnavailable ? (
-            <div className="gen-unavailable">
-              <LockIcon />
-              <span>Requires LTX Cloud API</span>
-              <p>Switch to Cloud backend to use this mode.</p>
+            <div className="empty-state">
+              <span className="empty-state-icon"><LockIcon /></span>
+              <div className="empty-state-title">Runs on LTX Cloud</div>
+              <p className="empty-state-desc">
+                {MODES.find(m => m.key === mode)?.label} isn't available locally yet — switch to the Cloud API to use it.
+              </p>
+              <button className="btn btn-secondary btn-sm" onClick={() => setBackend('cloud')}>
+                Switch to Cloud
+              </button>
             </div>
           ) : (
             <>
@@ -473,108 +496,130 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
               {mode === 'text-to-image' && (
                 <>
                   <PromptField value={prompt} onChange={setPrompt} placeholder="Describe the image you want to create..." />
-                  <FormField label="Model">
-                    <SelectField value={imageModel} options={IMAGE_MODELS} onChange={setImageModel} />
-                  </FormField>
-                  <FormField label="Resolution">
-                    <SelectField value={imageResolution} options={IMAGE_RESOLUTIONS} onChange={setImageResolution} />
-                  </FormField>
+                  <Section title="Settings">
+                    <div className="gen-row">
+                      <FormField label="Model">
+                        <SelectField value={imageModel} options={IMAGE_MODELS} onChange={setImageModel} />
+                      </FormField>
+                      <FormField label="Resolution">
+                        <SelectField value={imageResolution} options={IMAGE_RESOLUTIONS} onChange={setImageResolution} />
+                      </FormField>
+                    </div>
+                  </Section>
                 </>
               )}
 
               {mode === 'text-to-speech' && (
                 <>
-                  <PromptField value={prompt} onChange={setPrompt} placeholder="Type the text you want spoken..." />
-                  <FormField label="Speaker">
-                    <SelectField value={ttsSpeaker} options={TTS_SPEAKERS} onChange={setTtsSpeaker} />
-                  </FormField>
-                  <FormField label="Language">
-                    <SelectField value={ttsLanguage} options={TTS_LANGUAGES} onChange={setTtsLanguage} />
-                  </FormField>
-                  <FormField label="Model Size">
-                    <SelectField value={ttsModel} options={TTS_MODELS} onChange={setTtsModel} />
-                  </FormField>
-                  <FormField label="Style Instruction (optional)">
-                    <input
-                      type="text"
-                      className="gen-input"
-                      value={ttsInstruct}
-                      onChange={e => setTtsInstruct(e.target.value)}
-                      placeholder="e.g. Speak in an excited tone"
-                    />
-                  </FormField>
-                  <FormField label="Voice Clone Audio (optional)">
-                    <DropZone
-                      accept="audio/*"
-                      file={ttsRefAudio}
-                      onFile={handleFileSelect(setTtsRefAudio)}
-                      onClear={() => setTtsRefAudio(null)}
-                      placeholder="Drag a voice sample to clone"
-                    />
-                  </FormField>
+                  <PromptField label="Text" value={prompt} onChange={setPrompt} placeholder="Type the text you want spoken..." />
+                  <Section title="Voice">
+                    <div className="gen-row">
+                      <FormField label="Speaker">
+                        <SelectField value={ttsSpeaker} options={TTS_SPEAKERS} onChange={setTtsSpeaker} />
+                      </FormField>
+                      <FormField label="Language">
+                        <SelectField value={ttsLanguage} options={TTS_LANGUAGES} onChange={setTtsLanguage} />
+                      </FormField>
+                    </div>
+                    <FormField label="Model size">
+                      <SelectField value={ttsModel} options={TTS_MODELS} onChange={setTtsModel} />
+                    </FormField>
+                  </Section>
+                  <MoreOptions>
+                    <FormField label="Style instruction">
+                      <input
+                        type="text"
+                        className="input"
+                        value={ttsInstruct}
+                        onChange={e => setTtsInstruct(e.target.value)}
+                        placeholder="e.g. Speak in an excited tone"
+                      />
+                    </FormField>
+                    <FormField label="Voice clone audio">
+                      <DropZone
+                        accept="audio/*"
+                        file={ttsRefAudio}
+                        onFile={handleFileSelect(setTtsRefAudio)}
+                        onClear={() => setTtsRefAudio(null)}
+                        placeholder="Drop a short voice sample to clone"
+                      />
+                    </FormField>
+                  </MoreOptions>
                 </>
               )}
 
               {mode === 'text-to-video' && (
                 <>
-                  <PromptField value={prompt} onChange={setPrompt} placeholder="Write a prompt..." />
-                  <FormField label="Model">
-                    <SelectField value={model} options={MODELS} onChange={setModel} />
-                  </FormField>
-                  <FormField label="Duration">
-                    <SelectField value={duration} options={DURATIONS} onChange={setDuration} />
-                  </FormField>
-                  <FormField label="Resolution">
-                    <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
-                  </FormField>
-                  <FormField label="FPS">
-                    <SelectField value={fps} options={FPS_OPTIONS} onChange={setFps} />
-                  </FormField>
-                  <FormField label="Generate Audio">
-                    <div className="gen-toggle-group">
-                      <button className={`gen-toggle-btn ${generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(true)}>On</button>
-                      <button className={`gen-toggle-btn ${!generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(false)}>Off</button>
+                  <PromptField value={prompt} onChange={setPrompt} placeholder="Describe the video you want to create..." />
+                  <Section title="Settings">
+                    <FormField label="Model">
+                      <SelectField value={model} options={MODELS} onChange={setModel} />
+                    </FormField>
+                    <div className="gen-row">
+                      <FormField label="Duration">
+                        <SelectField value={duration} options={DURATIONS} onChange={setDuration} />
+                      </FormField>
+                      <FormField label="Resolution">
+                        <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
+                      </FormField>
                     </div>
-                  </FormField>
-                  <FormField label="Camera Motion">
-                    <SelectField value={cameraMotion} options={CAMERA_MOTIONS} onChange={setCameraMotion} />
-                  </FormField>
+                    <FormField label="Camera motion">
+                      <SelectField value={cameraMotion} options={CAMERA_MOTIONS} onChange={setCameraMotion} />
+                    </FormField>
+                  </Section>
+                  <MoreOptions>
+                    <FormField label="Frame rate">
+                      <SelectField value={fps} options={FPS_OPTIONS} onChange={setFps} />
+                    </FormField>
+                    <FormField label="Generate audio">
+                      <div className="gen-toggle-group">
+                        <button className={`gen-toggle-btn ${generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(true)}>On</button>
+                        <button className={`gen-toggle-btn ${!generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(false)}>Off</button>
+                      </div>
+                    </FormField>
+                  </MoreOptions>
                 </>
               )}
 
               {mode === 'image-to-video' && (
                 <>
-                  <FormField label="First Frame">
+                  <FormField label="First frame">
                     <DropZone
                       accept="image/*"
                       file={firstFrame}
                       onFile={handleFileSelect(setFirstFrame)}
                       onClear={() => setFirstFrame(null)}
-                      placeholder="Drag image or click to upload"
+                      placeholder="Drop an image here, or click to browse"
                     />
                   </FormField>
-                  <PromptField value={prompt} onChange={setPrompt} placeholder="Write a prompt..." />
-                  <FormField label="Model">
-                    <SelectField value={model} options={MODELS} onChange={setModel} />
-                  </FormField>
-                  <FormField label="Duration">
-                    <SelectField value={duration} options={DURATIONS} onChange={setDuration} />
-                  </FormField>
-                  <FormField label="Resolution">
-                    <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
-                  </FormField>
-                  <FormField label="FPS">
-                    <SelectField value={fps} options={FPS_OPTIONS} onChange={setFps} />
-                  </FormField>
-                  <FormField label="Generate Audio">
-                    <div className="gen-toggle-group">
-                      <button className={`gen-toggle-btn ${generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(true)}>On</button>
-                      <button className={`gen-toggle-btn ${!generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(false)}>Off</button>
+                  <PromptField value={prompt} onChange={setPrompt} placeholder="Describe how the image should move..." />
+                  <Section title="Settings">
+                    <FormField label="Model">
+                      <SelectField value={model} options={MODELS} onChange={setModel} />
+                    </FormField>
+                    <div className="gen-row">
+                      <FormField label="Duration">
+                        <SelectField value={duration} options={DURATIONS} onChange={setDuration} />
+                      </FormField>
+                      <FormField label="Resolution">
+                        <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
+                      </FormField>
                     </div>
-                  </FormField>
-                  <FormField label="Camera Motion">
-                    <SelectField value={cameraMotion} options={CAMERA_MOTIONS} onChange={setCameraMotion} />
-                  </FormField>
+                    <FormField label="Camera motion">
+                      <SelectField value={cameraMotion} options={CAMERA_MOTIONS} onChange={setCameraMotion} />
+                    </FormField>
+                  </Section>
+                  <MoreOptions>
+                    <FormField label="Frame rate">
+                      <SelectField value={fps} options={FPS_OPTIONS} onChange={setFps} />
+                    </FormField>
+                    <FormField label="Generate audio">
+                      <div className="gen-toggle-group">
+                        <button className={`gen-toggle-btn ${generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(true)}>On</button>
+                        <button className={`gen-toggle-btn ${!generateAudio ? 'active' : ''}`} onClick={() => setGenerateAudio(false)}>Off</button>
+                      </div>
+                    </FormField>
+                  </MoreOptions>
                 </>
               )}
 
@@ -586,7 +631,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
                       file={audioFile}
                       onFile={handleFileSelect(setAudioFile)}
                       onClear={() => setAudioFile(null)}
-                      placeholder="Drag audio file or click to upload"
+                      placeholder="Drop an audio file here, or click to browse"
                     />
                   </FormField>
                   <FormField label="Image (optional)">
@@ -595,35 +640,41 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
                       file={imageFile}
                       onFile={handleFileSelect(setImageFile)}
                       onClear={() => setImageFile(null)}
-                      placeholder="Drag image or click to upload"
+                      placeholder="Drop an image here, or click to browse"
                     />
                   </FormField>
-                  <PromptField value={prompt} onChange={setPrompt} placeholder="Write a prompt (optional if image provided)..." />
-                  <FormField label="Model">
-                    <SelectField value={model} options={MODELS} onChange={setModel} />
-                  </FormField>
-                  <FormField label="Resolution">
-                    <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
-                  </FormField>
-                  <FormField label="Guidance Scale">
-                    <div className="gen-number-row">
-                      <input
-                        type="number"
-                        className="gen-input gen-input-number"
-                        value={guidanceScale}
-                        onChange={e => setGuidanceScale(Number(e.target.value))}
-                        min={1}
-                        max={200}
-                      />
-                      <button
-                        className="gen-reset-btn"
-                        onClick={() => setGuidanceScale(75)}
-                        disabled={guidanceScale === 75}
-                      >
-                        Reset to default
-                      </button>
+                  <PromptField value={prompt} onChange={setPrompt} placeholder="Describe the video (optional if an image is provided)..." />
+                  <Section title="Settings">
+                    <div className="gen-row">
+                      <FormField label="Model">
+                        <SelectField value={model} options={MODELS} onChange={setModel} />
+                      </FormField>
+                      <FormField label="Resolution">
+                        <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
+                      </FormField>
                     </div>
-                  </FormField>
+                  </Section>
+                  <MoreOptions>
+                    <FormField label="Guidance scale">
+                      <div className="gen-number-row">
+                        <input
+                          type="number"
+                          className="input gen-input-number"
+                          value={guidanceScale}
+                          onChange={e => setGuidanceScale(Number(e.target.value))}
+                          min={1}
+                          max={200}
+                        />
+                        <button
+                          className="btn btn-ghost btn-sm"
+                          onClick={() => setGuidanceScale(75)}
+                          disabled={guidanceScale === 75}
+                        >
+                          Reset to default
+                        </button>
+                      </div>
+                    </FormField>
+                  </MoreOptions>
                 </>
               )}
 
@@ -635,37 +686,45 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
                       file={retakeVideo}
                       onFile={handleFileSelect(setRetakeVideo)}
                       onClear={() => setRetakeVideo(null)}
-                      placeholder="Drag video or click to upload"
+                      placeholder="Drop a video here, or click to browse"
                     />
                   </FormField>
-                  <FormField label="Start Time">
-                    <input
-                      type="text"
-                      className="gen-input"
-                      value={startTime}
-                      onChange={e => setStartTime(e.target.value)}
-                      placeholder="00:00.00"
-                    />
-                  </FormField>
-                  <FormField label="Duration">
-                    <input
-                      type="text"
-                      className="gen-input"
-                      value={retakeDuration}
-                      onChange={e => setRetakeDuration(e.target.value)}
-                      placeholder="00:02.00"
-                    />
-                  </FormField>
-                  <PromptField value={prompt} onChange={setPrompt} placeholder="Write a prompt..." />
-                  <FormField label="Model">
-                    <SelectField value={model} options={MODELS} onChange={setModel} />
-                  </FormField>
-                  <FormField label="Resolution">
-                    <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
-                  </FormField>
-                  <FormField label="Mode">
-                    <SelectField value={retakeMode} options={RETAKE_MODES} onChange={setRetakeMode} />
-                  </FormField>
+                  <div className="gen-row">
+                    <FormField label="Start time">
+                      <input
+                        type="text"
+                        className="input gen-mono"
+                        value={startTime}
+                        onChange={e => setStartTime(e.target.value)}
+                        placeholder="00:00.00"
+                      />
+                    </FormField>
+                    <FormField label="Duration">
+                      <input
+                        type="text"
+                        className="input gen-mono"
+                        value={retakeDuration}
+                        onChange={e => setRetakeDuration(e.target.value)}
+                        placeholder="00:02.00"
+                      />
+                    </FormField>
+                  </div>
+                  <PromptField value={prompt} onChange={setPrompt} placeholder="Describe what the new section should look like..." />
+                  <Section title="Settings">
+                    <FormField label="Replace">
+                      <SelectField value={retakeMode} options={RETAKE_MODES} onChange={setRetakeMode} />
+                    </FormField>
+                  </Section>
+                  <MoreOptions>
+                    <div className="gen-row">
+                      <FormField label="Model">
+                        <SelectField value={model} options={MODELS} onChange={setModel} />
+                      </FormField>
+                      <FormField label="Resolution">
+                        <SelectField value={resolution} options={RESOLUTIONS} onChange={setResolution} />
+                      </FormField>
+                    </div>
+                  </MoreOptions>
                 </>
               )}
 
@@ -677,43 +736,47 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
                       file={extendVideo}
                       onFile={handleFileSelect(setExtendVideo)}
                       onClear={() => setExtendVideo(null)}
-                      placeholder="Drag video or click to upload"
+                      placeholder="Drop a video here, or click to browse"
                     />
                   </FormField>
                   <PromptField value={prompt} onChange={setPrompt} placeholder="Describe what should happen in the extended video..." />
-                  <FormField label="Model">
-                    <SelectField value={model} options={MODELS} onChange={setModel} />
-                  </FormField>
-                  <FormField label="Mode">
-                    <SelectField value={extendMode} options={EXTEND_MODES} onChange={setExtendMode} />
-                  </FormField>
-                  <FormField label="Duration">
-                    <input
-                      type="text"
-                      className="gen-input"
-                      value={extendDuration}
-                      onChange={e => setExtendDuration(e.target.value)}
-                      placeholder="00:05.00"
-                    />
-                  </FormField>
-                  <FormField label="Context">
-                    <SelectField value={extendContext} options={EXTEND_CONTEXTS} onChange={setExtendContext} />
-                  </FormField>
+                  <Section title="Settings">
+                    <div className="gen-row">
+                      <FormField label="Direction">
+                        <SelectField value={extendMode} options={EXTEND_MODES} onChange={setExtendMode} />
+                      </FormField>
+                      <FormField label="Duration">
+                        <input
+                          type="text"
+                          className="input gen-mono"
+                          value={extendDuration}
+                          onChange={e => setExtendDuration(e.target.value)}
+                          placeholder="00:05.00"
+                        />
+                      </FormField>
+                    </div>
+                  </Section>
+                  <MoreOptions>
+                    <FormField label="Model">
+                      <SelectField value={model} options={MODELS} onChange={setModel} />
+                    </FormField>
+                    <FormField label="Context">
+                      <SelectField value={extendContext} options={EXTEND_CONTEXTS} onChange={setExtendContext} />
+                    </FormField>
+                  </MoreOptions>
                 </>
               )}
 
               {mode === 'video-hdr' && (
-                <>
-                  <FormField label="Video">
-                    <DropZone
-                      accept="video/*"
-                      file={hdrVideo}
-                      onFile={handleFileSelect(setHdrVideo)}
-                      onClear={() => setHdrVideo(null)}
-                      placeholder="Drag video or click to upload"
-                    />
-                  </FormField>
-                </>
+                <FormField label="Video">
+                  <DropZone
+                    accept="video/*"
+                    file={hdrVideo}
+                    onFile={handleFileSelect(setHdrVideo)}
+                    onClear={() => setHdrVideo(null)}
+                    placeholder="Drop a video here, or click to browse"
+                  />
+                </FormField>
               )}
             </>
           )}
@@ -721,16 +784,16 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
 
         {/* Footer */}
         <div className="gen-form-footer">
-          <button className="gen-clear-btn" onClick={handleClear} disabled={generating}>
+          <button className="btn btn-ghost" onClick={handleClear} disabled={generating}>
             Clear
           </button>
           <button
-            className="gen-generate-btn"
+            className="btn btn-primary gen-generate"
             onClick={handleGenerate}
             disabled={!canGenerate}
           >
             {generating ? (
-              <><span className="spinner" /> {selectedGen?.progress_step || 'Generating...'}</>
+              <><span className="spinner gen-generate-spinner" /> Generating…</>
             ) : (
               <><SparkleIcon /> Generate</>
             )}
@@ -741,20 +804,20 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
       {/* ── Output Side ── */}
       <div className="gen-output-side">
         <div className="gen-output-header">
-          <span className="gen-output-title">Output</span>
+          <span className="section-title">Output</span>
           <div className="gen-output-actions">
             {selectedGen?.status === 'generating' && (
-              <button className="gen-stop-btn" onClick={() => handleStop(selectedGen.id)}>
+              <button className="btn btn-sm btn-secondary gen-stop" onClick={() => handleStop(selectedGen.id)}>
                 <StopIcon /> Stop
               </button>
             )}
             {selectedGen?.status === 'done' && selectedGen.output_url && (
-              <a href={selectedGen.output_url} download className="gen-download-btn">
+              <a href={selectedGen.output_url} download className="btn btn-sm btn-secondary gen-download">
                 <DownloadIcon /> Download
               </a>
             )}
             {selectedGen && selectedGen.status !== 'generating' && (
-              <button className="gen-delete-btn" onClick={() => handleDelete(selectedGen.id)}>
+              <button className="btn btn-sm btn-danger" onClick={() => handleDelete(selectedGen.id)}>
                 <TrashIcon /> Delete
               </button>
             )}
@@ -792,7 +855,8 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
               {selectedGen.status === 'failed' && (
                 <div className="gen-output-error">
                   <FailIcon />
-                  <span>{selectedGen.error || 'Generation failed'}</span>
+                  <div className="gen-output-error-title">Something went wrong</div>
+                  <span>{selectedGen.error || 'The generation failed — try again, or tweak your settings.'}</span>
                 </div>
               )}
               {selectedGen.prompt && (
@@ -800,10 +864,10 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
               )}
             </div>
           ) : (
-            <div className="gen-output-empty">
-              <VideoPlaceholderIcon />
-              <span>No video yet</span>
-              <p>Generate a video to see the output here.</p>
+            <div className="empty-state">
+              <span className="empty-state-icon"><VideoPlaceholderIcon /></span>
+              <div className="empty-state-title">Nothing here yet</div>
+              <p className="empty-state-desc">Pick a mode on the left, describe what you want, and your result will show up here.</p>
             </div>
           )}
         </div>
@@ -812,8 +876,8 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         {generations.length > 0 && (
           <div className="gen-gallery-strip">
             <div className="gen-gallery-strip-header">
-              <span className="gen-gallery-strip-title">Past Generations</span>
-              <span className="gen-gallery-strip-count">{generations.length}</span>
+              <span className="section-title">Recent</span>
+              <span className="badge badge-neutral">{generations.length}</span>
             </div>
             <div className="gen-gallery-strip-scroll">
               {generations.map(gen => (
@@ -875,15 +939,17 @@ function GeneratingStatus({ gen }: { gen: Generation }) {
   const elapsed = Math.max(0, Math.floor(now / 1000 - gen.created_at))
   const progress = gen.progress || 0
 
+  const noun = gen.mode === 'text-to-image' ? 'image'
+    : gen.mode === 'text-to-speech' ? 'audio'
+    : 'video'
+
   // Estimate remaining time based on progress percentage
   let etaText = ''
   if (progress > 5 && progress < 100) {
     const estimated = Math.round((elapsed / progress) * (100 - progress))
-    if (estimated > 60) {
-      etaText = `~${Math.floor(estimated / 60)}m ${estimated % 60}s remaining`
-    } else {
-      etaText = `~${estimated}s remaining`
-    }
+    etaText = estimated > 60
+      ? `about ${Math.floor(estimated / 60)}m ${estimated % 60}s left`
+      : `about ${estimated}s left`
   }
 
   const elapsedMin = Math.floor(elapsed / 60)
@@ -894,8 +960,11 @@ function GeneratingStatus({ gen }: { gen: Generation }) {
 
   return (
     <div className="gen-output-loading">
-      <span className="spinner" />
-      <span>{gen.progress_step || 'Generating video...'}</span>
+      <span className="spinner gen-loading-spinner" />
+      <div className="gen-loading-title">Generating your {noun}</div>
+      <div className="gen-loading-sub">
+        {etaText ? `Almost done — ${etaText}` : 'Hang tight — this can take a little while'}
+      </div>
       {progress > 0 && (
         <div className="gen-progress-bar">
           <div
@@ -905,48 +974,73 @@ function GeneratingStatus({ gen }: { gen: Generation }) {
         </div>
       )}
       <div className="gen-timer-row">
-        <span className="gen-progress-pct">{progress}%</span>
+        {progress > 0 && <span className="gen-progress-pct">{progress}%</span>}
         <span className="gen-timer-elapsed">{elapsedText} elapsed</span>
-        {etaText && <span className="gen-timer-eta">{etaText}</span>}
       </div>
+      {gen.progress_step && (
+        <div className="gen-loading-step">{gen.progress_step}</div>
+      )}
     </div>
   )
 }
 
 /* ── Sub-components ────────────────────────────────────────────────────────── */
 
+function Section({ title, children }: { title?: string; children: React.ReactNode }) {
+  return (
+    <section className="gen-section">
+      {title && <div className="section-title">{title}</div>}
+      {children}
+    </section>
+  )
+}
+
+function MoreOptions({ children }: { children: React.ReactNode }) {
+  return (
+    <details className="gen-more">
+      <summary className="gen-more-summary">
+        <span className="gen-more-chevron"><ChevronIcon /></span>
+        More options
+      </summary>
+      <div className="gen-more-body">{children}</div>
+    </details>
+  )
+}
+
 function FormField({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div className="gen-field">
-      <label className="gen-field-label">{label}</label>
+    <div className="field">
+      <label className="field-label">{label}</label>
       {children}
     </div>
   )
 }
 
 function PromptField({
+  label = 'Prompt',
   value,
   onChange,
   placeholder,
 }: {
+  label?: string
   value: string
   onChange: (v: string) => void
   placeholder: string
 }) {
   return (
-    <div className="gen-field">
+    <div className="field">
       <div className="gen-field-label-row">
-        <label className="gen-field-label">Prompt</label>
+        <label className="field-label">{label}</label>
         <span className="gen-char-count">{value.length} / 5000</span>
       </div>
       <textarea
-        className="gen-textarea"
+        className="textarea gen-prompt-textarea"
         value={value}
         onChange={e => {
           if (e.target.value.length <= 5000) onChange(e.target.value)
         }}
         placeholder={placeholder}
-        rows={4}
+        rows={5}
       />
     </div>
   )
@@ -963,7 +1057,7 @@ function SelectField({
 }) {
   return (
     <select
-      className="gen-select"
+      className="select"
       value={value}
       onChange={e => onChange(e.target.value)}
     >
@@ -1024,9 +1118,9 @@ function DropZone({
         )}
         <div className="gen-dropzone-preview-info">
           <span className="gen-dropzone-filename">{file.file.name}</span>
-          {file.uploading && <span className="gen-dropzone-uploading"><span className="spinner" /> Uploading...</span>}
-          {file.path && <span className="gen-dropzone-ready">Ready</span>}
-          <button className="gen-dropzone-remove" onClick={onClear}>Remove</button>
+          {file.uploading && <span className="gen-dropzone-uploading"><span className="spinner" /> Uploading…</span>}
+          {file.path && <span className="badge badge-success">Ready</span>}
+          <button className="btn btn-danger btn-sm" onClick={onClear}>Remove</button>
         </div>
       </div>
     )
@@ -1057,6 +1151,14 @@ function DropZone({
 }
 
 /* ── SVG Icons ─────────────────────────────────────────────────────────────── */
+
+function ChevronIcon() {
+  return (
+    <svg viewBox="0 0 12 12" width="10" height="10" fill="none" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round">
+      <path d="M4.5 2.5L8 6l-3.5 3.5" />
+    </svg>
+  )
+}
 
 function StopIcon() {
   return (

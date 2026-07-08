@@ -1,0 +1,156 @@
+/* Preset Bar + Project Bar — owned by PresetBar.tsx and ProjectBar.tsx.
+   The two bars are styled as one cohesive "context strip" above the chat:
+   identical row metrics, a shared label/select treatment, and buttons built
+   on the global .btn primitives from ../index.css. Only the faint divider
+   between the rows and the strip's closing border differ. */
+
+/* ── Shared row treatment ────────────────────────────────────────────────── */
+.project-bar,
+.preset-bar-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: 48px;
+  padding: var(--space-2) var(--space-4);
+  background: var(--bg-panel);
+}
+
+.project-bar {
+  flex-shrink: 0;
+  /* Faint internal divider so the two rows read as one strip */
+  border-bottom: 1px solid var(--border);
+  border-bottom-color: color-mix(in srgb, var(--border) 55%, transparent);
+}
+
+.preset-bar {
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  flex-shrink: 0;
+}
+
+/* Fixed label width keeps the two selects vertically aligned across rows */
+.bar-label {
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  font-weight: 500;
+  color: var(--text-secondary);
+  min-width: 84px;
+  flex-shrink: 0;
+}
+
+.bar-select {
+  appearance: none;
+  -webkit-appearance: none;
+  background: var(--bg-input);
+  background-image: url("data:image/svg+xml,%3Csvg width='10' height='6' viewBox='0 0 10 6' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M1 1l4 4 4-4' stroke='%23a8a8c8' stroke-width='1.5' fill='none' stroke-linecap='round'/%3E%3C/svg%3E");
+  background-repeat: no-repeat;
+  background-position: right 10px center;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-family: var(--font-ui);
+  font-size: var(--text-sm);
+  font-weight: 500;
+  padding: 6px 32px 6px 12px;
+  max-width: 360px;
+  outline: none;
+  cursor: pointer;
+  transition: border-color var(--transition), box-shadow var(--transition);
+}
+
+.bar-select:hover { border-color: var(--border-bright); }
+.bar-select:focus {
+  border-color: var(--accent);
+  box-shadow: var(--shadow-focus);
+}
+
+/* Compact inline input for create/rename, sized to sit beside .btn-sm */
+.input.bar-input {
+  width: 220px;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
+}
+
+/* ── Project bar ─────────────────────────────────────────────────────────── */
+.project-bar-actions,
+.project-bar-edit {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Quiet-until-hovered destructive action, layered on .btn-ghost */
+.btn.bar-btn-danger:hover:not(:disabled) {
+  color: var(--red);
+  border-color: rgba(252, 98, 85, 0.4);
+  background: var(--red-dim);
+}
+
+/* ── Preset bar header ───────────────────────────────────────────────────── */
+.preset-bar-header {
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.preset-bar-header:hover { background: var(--bg-card); }
+
+.preset-bar-side {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+}
+
+.preset-bar-meta {
+  font-family: var(--font-ui);
+  font-size: var(--text-xs);
+  color: var(--text-muted);
+}
+
+.preset-chevron {
+  flex-shrink: 0;
+  transition: transform var(--transition);
+}
+
+.preset-chevron.open { transform: rotate(180deg); }
+
+/* ── Preset settings drawer ──────────────────────────────────────────────── */
+.preset-settings {
+  padding: var(--space-4);
+  border-top: 1px solid var(--border);
+  border-top-color: color-mix(in srgb, var(--border) 55%, transparent);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.preset-settings-prompts {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: var(--space-4);
+}
+
+.preset-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+  gap: var(--space-3) var(--space-4);
+}
+
+.preset-settings-footer {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.preset-save-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 1;
+  max-width: 480px;
+}
+
+.preset-save-input {
+  flex: 1;
+  min-width: 0;
+}

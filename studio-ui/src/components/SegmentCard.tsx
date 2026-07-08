@@ -1,23 +1,24 @@
-import { useRef } from 'react'
+import { useRef, useState } from 'react'
 import type { Segment, SegmentStatus } from '../api'
 
 // ── Status Badge ─────────────────────────────────────────────────────────────
 
-const STATUS_LABELS: Record<SegmentStatus, string> = {
-  approved: 'approved',
-  done: 'done',
-  needs_review: 'review',
-  qa_failed: 'qa failed',
-  pending: 'pending',
-  generating: 'rendering',
-  failed: 'failed',
+const STATUS_META: Record<SegmentStatus, { label: string; tone: string }> = {
+  approved: { label: 'Approved', tone: 'badge-success' },
+  done: { label: 'Ready', tone: 'badge-success' },
+  needs_review: { label: 'Needs review', tone: 'badge-warning' },
+  qa_failed: { label: 'QA failed', tone: 'badge-danger' },
+  pending: { label: 'Waiting', tone: 'badge-neutral' },
+  generating: { label: 'Rendering', tone: 'badge-accent' },
+  failed: { label: 'Failed', tone: 'badge-danger' },
 }
 
 function StatusBadge({ status }: { status: SegmentStatus }) {
+  const meta = STATUS_META[status]
   return (
-    <span className={`status-badge ${status}`}>
+    <span className={`badge ${meta.tone} status-badge${status === 'generating' ? ' generating' : ''}`}>
       <span className="status-dot" />
-      {STATUS_LABELS[status]}
+      {meta.label}
     </span>
   )
 }
@@ -39,6 +40,7 @@ function zeroPad(n: number): string {
 
 function AudioButton({ src }: { src: string }) {
   const audioRef = useRef<HTMLAudioElement>(null)
+  const [playing, setPlaying] = useState(false)
 
   function toggle() {
     const audio = audioRef.current
@@ -52,12 +54,25 @@ function AudioButton({ src }: { src: string }) {
 
   return (
     <>
-      <audio ref={audioRef} src={src} preload="none" />
-      <button className="audio-btn" onClick={toggle} title="Play narration audio">
-        <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
-          <path d="M1 1.5L10 6L1 10.5V1.5Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round"/>
-        </svg>
-        narration.mp3
+      <audio
+        ref={audioRef}
+        src={src}
+        preload="none"
+        onPlay={() => setPlaying(true)}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+      />
+      <button className="audio-btn" onClick={toggle}>
+        {playing ? (
+          <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M2.5 1.5v9M8.5 1.5v9" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+        ) : (
+          <svg width="11" height="12" viewBox="0 0 11 12" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M1 1.5L10 6L1 10.5V1.5Z" stroke="currentColor" strokeWidth="1.4" strokeLinejoin="round" />
+          </svg>
+        )}
+        {playing ? 'Pause narration' : 'Play narration'}
       </button>
     </>
   )
@@ -92,25 +107,25 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
   const beatCount = visual_count || Math.max(imageUrls.length, clipUrls.length)
 
   return (
-    <div className="segment-card">
+    <div className="segment-card card">
       {/* Header */}
       <div className="segment-card-header">
-        <span className="segment-index">SEG {zeroPad(index + 1)}</span>
-        <span className="segment-title" title={section_title}>· {section_title}</span>
-        <StatusBadge status={status} />
+        <span className="segment-index" aria-label={`Scene ${index + 1}`}>{zeroPad(index + 1)}</span>
+        <span className="segment-title" title={section_title}>{section_title}</span>
         {duration_seconds > 0 && (
           <span className="segment-duration">{formatDuration(duration_seconds)}</span>
         )}
         {beatCount > 1 && (
-          <span className="segment-beat-count">{beatCount} visuals</span>
+          <span className="badge badge-neutral segment-beats">{beatCount} visuals</span>
         )}
+        <StatusBadge status={status} />
       </div>
 
       {/* Body — 3 columns */}
       <div className="segment-body">
         {/* Col 1: Script */}
         <div className="seg-col">
-          <span className="seg-col-label">Script</span>
+          <span className="section-title seg-col-label">Script</span>
           <p className="narration-text">{narration_text}</p>
           {cues.length > 0 && (
             <div className="cues-list">
@@ -124,7 +139,7 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
           )}
           {storyboard.length > 0 && (
             <div className="storyboard-list">
-              <span className="storyboard-label">Storyboard</span>
+              <span className="section-title seg-col-label">Storyboard</span>
               {storyboard.slice(0, 4).map((frame, i) => (
                 <div className="storyboard-frame" key={frame.frame_id || `${frame.beat_id}-${i}`}>
                   <div className="storyboard-frame-head">
@@ -151,9 +166,9 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
           )}
         </div>
 
-        {/* Col 2: Image */}
+        {/* Col 2: Images */}
         <div className="seg-col">
-          <span className="seg-col-label">Image</span>
+          <span className="section-title seg-col-label">Images</span>
           {imageUrls[0] ? (
             <img
               className="seg-image"
@@ -162,7 +177,7 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
               loading="lazy"
             />
           ) : (
-            <div className="media-placeholder">no image yet</div>
+            <div className="media-placeholder">No images yet</div>
           )}
           {imageUrls.length > 1 && (
             <div className="beat-strip" aria-label={`${imageUrls.length} visual beats`}>
@@ -184,7 +199,7 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
 
         {/* Col 3: Clip */}
         <div className="seg-col">
-          <span className="seg-col-label">Clip</span>
+          <span className="section-title seg-col-label">Clip</span>
           {videoSrc ? (
             <video
               className="seg-video"
@@ -194,17 +209,17 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
               title={section_title}
             />
           ) : (
-            <div className="media-placeholder">no clip yet</div>
+            <div className="media-placeholder">No clip yet</div>
           )}
           {clipUrls.length > 1 && (
             <div className="beat-progress">
-              {clipUrls.length} rendered clips
+              {clipUrls.length} clips rendered
             </div>
           )}
           {audio_url && <AudioButton src={audio_url} />}
           {qa && qa.checks.length > 0 && (
             <div className="qa-issues">
-              <span className="qa-issues-label">QA</span>
+              <span className="section-title seg-col-label">Quality</span>
               {qa.checks.slice(0, 3).map((check, i) => (
                 <div className={`qa-issue ${check.severity}`} key={`${check.id}-${i}`}>
                   <span className="qa-issue-severity">{check.severity}</span>
