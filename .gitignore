@@ -38,3 +38,6 @@ voice_samples/*.wav
 
 # Manim media output
 media/
+
+# Studio runs (local artifacts)
+runs/

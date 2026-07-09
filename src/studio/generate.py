@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import shutil
+import tempfile
 import threading
 import time
 import uuid
@@ -19,7 +20,7 @@ from src.config import PipelineConfig
 
 logger = logging.getLogger(__name__)
 
-_GENS_DIR = Path("/tmp/video-studio-generations")
+_GENS_DIR = Path(tempfile.gettempdir()) / "video-studio-generations"
 _GENS_DIR.mkdir(parents=True, exist_ok=True)
 
 
@@ -70,9 +71,16 @@ def delete_generation(gen_id: str) -> bool:
 def stop_generation(gen_id: str) -> bool:
     """Stop a running generation by killing its subprocess, then delete it."""
     import signal
+    import sys
     p = _gen_path(gen_id)
     if not p.exists():
         return False
+    if sys.platform == "win32":
+        # Windows generations run in-process (diffusers), not as tagged
+        # subprocesses, and there is no pgrep. Best effort: drop the artifacts;
+        # the worker thread's result is discarded when the dir is gone.
+        shutil.rmtree(p, ignore_errors=True)
+        return True
     # Kill any mflux or ltx-2-mlx subprocesses for this gen
     import subprocess as sp
     try:
@@ -130,15 +138,26 @@ def _save_upload(src_path: str | None, out_dir: Path, name: str) -> Path | None:
     return dst
 
 
-_LTX_MLX_DIR = Path("/Volumes/4TB-Z/programming/ltx-2-mlx")
-
-
 def _cfg() -> PipelineConfig:
     return PipelineConfig()
 
 
 def _run_ltx_mlx(cmd_args: list[str], models_dir: str = "") -> dict:
-    """Run an ltx-2-mlx CLI command as a subprocess. Returns {success, error}."""
+    """Run an ltx-2-mlx CLI command as a subprocess. Returns {success, error}.
+
+    audio-to-video, retake, and extend are ltx-2-mlx CLI features, so the
+    local backend for them exists only on Apple Silicon; elsewhere callers
+    get a clear error pointing at backend="cloud".
+    """
+    from src.utils.hw import is_apple_silicon
+
+    if not is_apple_silicon():
+        return {
+            "success": False,
+            "error": "This local operation requires the ltx-2-mlx CLI (Apple "
+                     "Silicon only). Use backend='cloud' with PTV_LTX_API_KEY "
+                     "on this platform.",
+        }
     import subprocess as sp
     env = dict(__import__("os").environ)
     if models_dir:
@@ -147,7 +166,7 @@ def _run_ltx_mlx(cmd_args: list[str], models_dir: str = "") -> dict:
         proc = sp.run(
             ["uv", "run", "ltx-2-mlx"] + cmd_args,
             capture_output=True, text=True, timeout=3600,
-            cwd=str(_LTX_MLX_DIR), env=env,
+            cwd=str(_cfg().ltx_mlx_dir), env=env,
         )
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "")[-500:]
@@ -180,7 +199,7 @@ def _run_image_gen(gen_id: str, prompt: str, cfg: PipelineConfig) -> None:
         out_dir = _gen_path(gen_id)
         out_file = out_dir / "output.png"
 
-        from src.imagegen.flux import generate_image
+        from src.imagegen import generate_image
         result = generate_image(
             prompt=prompt,
             output_path=out_file,
@@ -232,7 +251,7 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
         src_image = Path(image_path) if image_path else None
         if src_image is None or not src_image.exists():
             src_image = out_dir / "input.png"
-            from src.imagegen.flux import generate_image
+            from src.imagegen import generate_image
             img_result = generate_image(
                 prompt=prompt,
                 output_path=src_image,
@@ -361,7 +380,7 @@ def _run_text_to_video(gen_id: str, prompt: str, backend: str,
                 "progress": 5, "progress_step": "Generating image with FLUX...",
             })
 
-            from src.imagegen.flux import generate_image
+            from src.imagegen import generate_image
             img_result = generate_image(
                 prompt=prompt, output_path=src_image,
                 model=cfg.image_model, steps=cfg.image_steps,

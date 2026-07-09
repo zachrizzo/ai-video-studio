@@ -45,6 +45,8 @@ def _chromium_launch_kwargs() -> dict:
         os.path.join(root, "chromium-*", "chrome-linux", "chrome"),
         os.path.join(root, "chromium-*", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
         os.path.join(root, "chromium-*", "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+        os.path.join(root, "chromium-*", "chrome-win", "chrome.exe"),
+        os.path.join(root, "chromium-*", "chrome-win64", "chrome.exe"),
     ]
     candidates = sorted(c for pattern in patterns for c in glob.glob(pattern))
     if candidates:

@@ -71,7 +71,17 @@ def _write_status(run_dir: Path, data: dict[str, Any]) -> dict[str, Any]:
         run_dir.mkdir(parents=True, exist_ok=True)
         tmp = _status_path(run_dir).with_suffix(".json.tmp")
         tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(_status_path(run_dir))
+        # On Windows os.replace raises PermissionError while a concurrent
+        # reader (the status GET endpoint) briefly holds the destination open.
+        # Retry with a short backoff instead of killing the producer thread.
+        for attempt in range(20):
+            try:
+                tmp.replace(_status_path(run_dir))
+                break
+            except PermissionError:
+                if attempt == 19:
+                    raise
+                time.sleep(0.05)
     return data
 
 
@@ -280,17 +290,18 @@ def _run_production(
 ) -> None:
     steps = _pipeline_steps(run_dir, mode, segment_ids)
     status = _initial_status(run_id, len(steps), mode, force_video, segment_ids)
-    _write_status(run_dir, status)
-
-    env = os.environ.copy()
-    env.setdefault("PTV_VIDEO_PROVIDER", "ltx")
-    env.setdefault("PTV_LTX_PREFER_EXTEND", "false")
-    if force_video:
-        env["PTV_VIDEO_FORCE"] = "true"
-    if speed is not None:
-        env["PTV_VIDEO_SPEED"] = str(speed)
 
     try:
+        _write_status(run_dir, status)
+
+        env = os.environ.copy()
+        env.setdefault("PTV_VIDEO_PROVIDER", "ltx")
+        env.setdefault("PTV_LTX_PREFER_EXTEND", "false")
+        if force_video:
+            env["PTV_VIDEO_FORCE"] = "true"
+        if speed is not None:
+            env["PTV_VIDEO_SPEED"] = str(speed)
+
         job = job_ref["job"]
         for index, (step, label, args) in enumerate(steps, start=1):
             _run_command(

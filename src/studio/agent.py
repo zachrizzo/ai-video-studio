@@ -13,6 +13,7 @@ import asyncio
 import json
 import logging
 import os
+import tempfile
 import re
 from pathlib import Path
 from typing import Any
@@ -38,7 +39,7 @@ def _extract_run_id(tool_input: dict[str, Any]) -> str | None:
 
 def _snapshot_run_scripts() -> dict[str, float]:
     """Return script.json mtimes keyed by run id for changed-run detection."""
-    root = Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+    root = Path(os.environ.get("STUDIO_RUNS_DIR", str(Path(tempfile.gettempdir()) / "mongol-video")))
     if not root.is_dir():
         return {}
     mtimes: dict[str, float] = {}
@@ -182,7 +183,8 @@ PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
 QUICK CLIP RECIPE — when the user asks for a short standalone clip of something
 (e.g. "make a 5s video of someone dancing"), do NOT refuse and do NOT require a PDF.
 Do this:
-1. `uv run python -m src.pipeline setup /tmp/paper-to-video`  (run lands in the viewer dir)
+1. `uv run python -m src.pipeline setup <temp dir>/paper-to-video`  (run lands in the
+   viewer dir; use the platform temp dir, e.g. /tmp on macOS, %TEMP% on Windows)
 2. Write `<run_dir>/script.json` with ONE segment and the production fields above:
    visual_type "scene",
    estimated_duration_seconds ~5, a vivid `image_prompt` that DESCRIBES MOTION

@@ -8,17 +8,19 @@ from __future__ import annotations
 
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Any
 
 # Default location; overridden by env var STUDIO_RUNS_DIR
-RUNS_ROOT = Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+_DEFAULT_RUNS_ROOT = str(Path(tempfile.gettempdir()) / "mongol-video")
+RUNS_ROOT = Path(os.environ.get("STUDIO_RUNS_DIR", _DEFAULT_RUNS_ROOT))
 PRODUCTION_STATUS_FILE = ".production_status.json"
 
 
 def _runs_root() -> Path:
     """Return the current runs root (respects live env-var changes)."""
-    return Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+    return Path(os.environ.get("STUDIO_RUNS_DIR", _DEFAULT_RUNS_ROOT))
 
 
 # ---------------------------------------------------------------------------

@@ -23,8 +23,11 @@ photos, AI motion clips, and a final composite — all running on your own machi
   beat before generation starts.
 - **Voice** via ElevenLabs (or silent tracks for testing).
 - **Word-synced compositing** with FFmpeg into a YouTube-ready MP4.
-- **Runs locally** on Apple Silicon; large model weights cache to a configurable dir
-  (e.g. an external drive) and generations are serialized to stay within memory.
+- **Runs locally** on Apple Silicon, Windows, and Linux. The pipeline detects the
+  OS and picks the equivalent backend: mflux/MLX + ltx-2-mlx on Apple Silicon,
+  diffusers + PyTorch (CUDA when available) elsewhere — same models either way.
+  Large model weights cache to a configurable dir (e.g. an external drive) and
+  generations are serialized to stay within memory.
 
 ## Architecture
 
@@ -42,10 +45,14 @@ studio-ui/ (React + Vite)  --ws/http-->  src/studio/ (FastAPI + Claude Agent SDK
 
 ## Quick start
 
-Requirements: macOS (Apple Silicon recommended), Python 3.12, [`uv`](https://docs.astral.sh/uv/), `ffmpeg`, Node.js.
+Requirements: macOS (Apple Silicon), Windows, or Linux; Python 3.12,
+[`uv`](https://docs.astral.sh/uv/), `ffmpeg`, Node.js. On Windows/Linux an
+NVIDIA GPU is strongly recommended (the diffusers backends use CUDA and
+quantize models with bitsandbytes to fit consumer VRAM; without a GPU they
+fall back to very slow CPU inference).
 
 ```bash
-# 1. install python deps
+# 1. install python deps (on Windows this pulls the CUDA build of PyTorch)
 uv sync
 
 # 2. configure — see .env.example
@@ -53,12 +60,31 @@ cp .env.example .env   # add PTV_ELEVENLABS_API_KEY, PTV_VOICE_ID, PTV_MODELS_DI
 
 # 3. backend (serves API + chat)
 STUDIO_RUNS_DIR=/tmp/video-runs uv run uvicorn src.studio.server:app --port 8787
+# Windows (PowerShell):
+#   $env:STUDIO_RUNS_DIR="$env:TEMP\video-runs"; uv run uvicorn src.studio.server:app --port 8787
 
 # 4. frontend
 cd studio-ui && npm install && npm run dev   # http://localhost:5173
 ```
 
 Then open the app and ask it to make a video.
+
+### Platform backends
+
+The pipeline checks the OS at runtime and routes each generation step to an
+equivalent backend, so it runs the same way everywhere:
+
+| Step        | Apple Silicon              | Windows / Linux                              |
+| ----------- | -------------------------- | -------------------------------------------- |
+| Images      | mflux (MLX CLI)            | diffusers `ZImagePipeline`/`FluxPipeline` (CUDA, NF4-quantized) |
+| AI motion   | ltx-2-mlx CLI              | diffusers `LTX2ImageToVideoPipeline` (CUDA)  |
+| Voice (qwen)| Qwen3-TTS checkout (MPS)   | `qwen-tts` package in the project venv (CUDA/CPU) |
+| Ken Burns / compositing | ffmpeg (identical everywhere)                             |
+
+Overrides: `PTV_IMAGE_PROVIDER` (auto | mflux | diffusers),
+`PTV_LTX_BACKEND` (auto | mlx | torch). Audio-to-video, retake, and extend are
+ltx-2-mlx CLI features — on Windows/Linux use their `backend="cloud"` mode with
+`PTV_LTX_API_KEY`.
 
 ### Voice with Voicebox (optional, recommended)
 

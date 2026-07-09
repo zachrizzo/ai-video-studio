@@ -81,7 +81,7 @@ def _mount_media() -> None:
 _mount_media()
 
 # Mount generations directory for serving generated files
-_GENS_DIR = Path("/tmp/video-studio-generations")
+from src.studio.generate import _GENS_DIR  # tempfile-based, portable
 _GENS_DIR.mkdir(parents=True, exist_ok=True)
 app.mount(
     "/generations",

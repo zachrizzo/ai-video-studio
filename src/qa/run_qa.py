@@ -108,7 +108,10 @@ def _text_similarity(expected: str, actual: str) -> float:
     actual_norm = _normalize_text(actual)
     if not expected_norm or not actual_norm:
         return 0.0
-    return difflib.SequenceMatcher(None, expected_norm, actual_norm).ratio()
+    # autojunk=False: the default heuristic marks frequent characters as junk
+    # on strings >200 chars, collapsing the ratio for near-identical
+    # transcripts (a correct 220-char narration scored 0.60 with it on).
+    return difflib.SequenceMatcher(None, expected_norm, actual_norm, autojunk=False).ratio()
 
 
 def _ffprobe_duration(path: Path) -> float | None:

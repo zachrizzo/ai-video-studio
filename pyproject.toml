@@ -22,9 +22,13 @@ dependencies = [
     "fastapi>=0.138.0",
     "uvicorn[standard]>=0.49.0",
     "claude-agent-sdk>=0.2.110",
-    "mflux>=0.18.0",
+    # MLX image backend — Apple Silicon only; other platforms use diffusers
+    "mflux>=0.18.0; sys_platform == 'darwin'",
     "diffusers @ git+https://github.com/huggingface/diffusers",
-    "accelerate>=1.14.0",
+    # Direct dep so [tool.uv.sources] can pin the CUDA build on Windows
+    "torch>=2.12.0",
+    # >=1.12 (not 1.14): qwen-tts pins accelerate==1.12.0 on non-mac platforms
+    "accelerate>=1.12.0",
     "imageio>=2.37.3",
     "imageio-ffmpeg>=0.6.0",
     "httpx>=0.27.0",
@@ -32,6 +36,12 @@ dependencies = [
     # Collage engine — cutout extraction
     "rembg>=2.0.57",
     "onnxruntime>=1.17.0",
+    # Windows/Linux generation backends (macOS uses mflux/MLX + external venvs)
+    "bitsandbytes>=0.45.0; sys_platform != 'darwin'",
+    "qwen-tts>=0.1.0; sys_platform != 'darwin'",
+    "soundfile>=0.12.0; sys_platform != 'darwin'",
+    # Word-level alignment + QA transcription (macOS uses a pyenv whisper)
+    "openai-whisper>=20240930; sys_platform != 'darwin'",
 ]
 
 [project.optional-dependencies]
@@ -51,3 +61,13 @@ paper-to-video = "src.pipeline:main"
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+
+# CUDA-enabled torch on Windows (PyPI wheels there are CPU-only). Other
+# platforms keep the default index: macOS uses MPS, Linux PyPI wheels bundle CUDA.
+[tool.uv.sources]
+torch = [{ index = "pytorch-cu126", marker = "sys_platform == 'win32'" }]
+
+[[tool.uv.index]]
+name = "pytorch-cu126"
+url = "https://download.pytorch.org/whl/cu126"
+explicit = true

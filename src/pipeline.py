@@ -557,7 +557,7 @@ def cmd_imagegen(script_json: str, run_dir: str, segment_ids: str = ""):
     """
     from .analysis.script_writer import load_script
     from .config import PipelineConfig
-    from .imagegen.flux import generate_image
+    from .imagegen import generate_image
     from .visuals.beats import beat_image_path, beat_matches_filter, segment_visual_beats
 
     config = PipelineConfig()

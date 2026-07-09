@@ -71,7 +71,7 @@ def run_assets(script_path: Path, run_dir: Path, segment_ids: str = "") -> None:
     from ..collage.spec import default_asset_seed, load_collage_spec
     from ..config import PipelineConfig
     from ..imagegen.cutout import extract_cutout
-    from ..imagegen.flux import generate_image
+    from ..imagegen import generate_image
     from ..studio.style_packs import load_style_pack
     from ..utils.locks import generation_lock
 

@@ -1,9 +1,10 @@
 """Video generation presets — stored as JSON on disk."""
 
 import json
+import tempfile
 from pathlib import Path
 
-_PRESETS_FILE = Path("/tmp/video-studio-generations/presets.json")
+_PRESETS_FILE = Path(tempfile.gettempdir()) / "video-studio-generations" / "presets.json"
 
 DEFAULT_PRESETS = {
     "stick_figure_history": {

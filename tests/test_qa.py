@@ -203,10 +203,10 @@ def test_ltx_motion_prompt_uses_storyboard_action() -> None:
     beat = segment_visual_beats(segment)[0]
     prompt = ltx_motion_prompt(beat)
 
-    assert "Bring this action to life" in prompt
+    assert "The only subject motion is" in prompt
     assert "leans back in surprise" in prompt
     assert "slow push-in" in prompt
-    assert "Avoid frozen subjects" in prompt
+    assert "Preserve the original character identity" in prompt
 
 
 def test_qa_checks_visual_beat_artifacts(tmp_path: Path, monkeypatch) -> None:

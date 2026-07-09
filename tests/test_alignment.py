@@ -11,6 +11,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -164,50 +165,53 @@ def _collage_run(tmp_path: Path) -> tuple[Path, Path]:
     return script_path, run_dir
 
 
-def _fake_whisper(tmp_path: Path) -> Path:
-    """A shell script emulating whisper: writes a whisper-style JSON to --output_dir."""
-    script = tmp_path / "fake_whisper.sh"
+def _command_for(script: Path) -> str:
+    """A PTV_ALIGN_COMMAND string that runs ``script`` with this interpreter.
+
+    Cross-platform: python scripts run everywhere (the original bash fixtures
+    could not execute on Windows). Forward slashes because the command is
+    parsed with POSIX shlex.split, which eats backslashes.
+    """
+    py = sys.executable.replace("\\", "/")
+    return f'"{py}" "{script.as_posix()}"'
+
+
+def _fake_whisper(tmp_path: Path) -> str:
+    """A python script emulating whisper: writes a whisper-style JSON to --output_dir."""
+    script = tmp_path / "fake_whisper.py"
     script.write_text(
-        """#!/usr/bin/env bash
-set -e
-out_dir=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --output_dir) out_dir="$2"; shift 2 ;;
-    *) shift ;;
-  esac
-done
-cat > "$out_dir/seg01.json" <<'JSON'
-{
-  "text": "Clouds drift over the valley",
-  "segments": [
-    {"id": 0, "text": "Clouds drift over the valley", "words": [
-      {"word": "Clouds", "start": 0.0, "end": 0.2},
-      {"word": "drift", "start": 0.2, "end": 0.4},
-      {"word": "over", "start": 0.4, "end": 0.6},
-      {"word": "the", "start": 0.6, "end": 0.7},
-      {"word": "valley", "start": 0.7, "end": 1.0}
-    ]}
-  ]
+        """import json, sys
+args = sys.argv[1:]
+out_dir = args[args.index("--output_dir") + 1]
+payload = {
+    "text": "Clouds drift over the valley",
+    "segments": [
+        {"id": 0, "text": "Clouds drift over the valley", "words": [
+            {"word": "Clouds", "start": 0.0, "end": 0.2},
+            {"word": "drift", "start": 0.2, "end": 0.4},
+            {"word": "over", "start": 0.4, "end": 0.6},
+            {"word": "the", "start": 0.6, "end": 0.7},
+            {"word": "valley", "start": 0.7, "end": 1.0},
+        ]}
+    ],
 }
-JSON
+with open(f"{out_dir}/seg01.json", "w") as f:
+    json.dump(payload, f)
 """
     )
-    script.chmod(0o755)
-    return script
+    return _command_for(script)
 
 
-def _fake_whisper_bad_model(tmp_path: Path) -> Path:
+def _fake_whisper_bad_model(tmp_path: Path) -> str:
     """A whisper stand-in that rejects the model like argparse and exits 1."""
-    script = tmp_path / "fake_whisper_bad_model.sh"
+    script = tmp_path / "fake_whisper_bad_model.py"
     script.write_text(
-        """#!/usr/bin/env bash
-echo "error: argument --model: 'bogus-model' is not one of the available models" >&2
-exit 1
+        """import sys
+sys.stderr.write("error: argument --model: 'bogus-model' is not one of the available models\\n")
+sys.exit(1)
 """
     )
-    script.chmod(0o755)
-    return script
+    return _command_for(script)
 
 
 # ---------------------------------------------------------------------------

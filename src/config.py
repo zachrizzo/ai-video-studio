@@ -1,7 +1,12 @@
+import sys
+import tempfile
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pathlib import Path
 from typing import Literal
+
+_IS_MACOS = sys.platform == "darwin"
 
 
 class PipelineConfig(BaseSettings):
@@ -23,6 +28,9 @@ class PipelineConfig(BaseSettings):
     # recommend a Chatterbox Turbo profile for English narration), or
     # "elevenlabs" (cloud, needs API key).
     voice_provider: Literal["elevenlabs", "qwen", "voicebox"] = "qwen"
+    # macOS runs Qwen3-TTS from a dedicated checkout/venv (MPS); other platforms
+    # run the qwen-tts package inside this project's venv (CUDA/CPU).
+    qwen_tts_dir: str = "/Volumes/4TB-Z/programming/qwen-TTS/Qwen3-TTS"
     qwen_tts_speaker: str = "dylan"
     qwen_tts_language: str = "english"
     qwen_tts_model_size: str = "0.6B"
@@ -45,13 +53,15 @@ class PipelineConfig(BaseSettings):
     # already cached in models_dir. FLUX "schnell" remains a faster fallback
     # (PTV_IMAGE_MODEL=schnell); "dev" is gated + non-commercial. Other ungated
     # options: "z-image", "qwen", "flux2-klein-4b".
-    image_provider: Literal["mflux", "none"] = "mflux"
+    # "auto" resolves per-OS: mflux (MLX) on Apple Silicon, diffusers (PyTorch,
+    # CUDA when available) everywhere else. Both run the same models.
+    image_provider: Literal["auto", "mflux", "diffusers", "none"] = "auto"
     image_model: str = "z-image-turbo"
     image_steps: int = 8  # z-image-turbo ~6-10; schnell ~4-8; dev ~20-25
     # Where large model weights are cached (HuggingFace hub cache). Set to an
     # external drive to keep multi-GB models off the internal disk. Empty = default
     # (~/.cache/huggingface). The HF auth token stays in the default location.
-    models_dir: str = "/Volumes/4TB-Z/models"
+    models_dir: str = "/Volumes/4TB-Z/models" if _IS_MACOS else ""
     image_quantize: int = 4  # mflux -q (4 or 8); 4 = lowest memory
     image_force: bool = False  # regenerate even if a PNG already exists
     video_force: bool = False  # regenerate MP4 clips even if they already exist
@@ -62,6 +72,11 @@ class PipelineConfig(BaseSettings):
     #   kenburns = ffmpeg pan/zoom fallback (fast, no model)
     #   comfyui  = AI image-to-video via a ComfyUI server
     video_provider: Literal["kenburns", "ltx", "comfyui"] = "ltx"
+    # How LTX runs: "auto" = ltx-2-mlx CLI on Apple Silicon, diffusers/PyTorch
+    # (CUDA when available) elsewhere. Force "mlx" or "torch" to override.
+    ltx_backend: Literal["auto", "mlx", "torch"] = "auto"
+    # Checkout of ltx-2-mlx used by the MLX backend (macOS only).
+    ltx_mlx_dir: str = "/Volumes/4TB-Z/programming/ltx-2-mlx"
     kenburns_zoom: float = 1.12
     comfyui_url: str = "http://127.0.0.1:8188"
     comfyui_model: str = "ltx"
@@ -93,7 +108,7 @@ class PipelineConfig(BaseSettings):
     # Word-level narration alignment (whisper CLI, same shape as qa_asr_command).
     # large-v3-turbo: near large-v3 accuracy at ~4x speed (needs openai-whisper
     # >= 20240930; ~1.6 GB one-time weight download).
-    align_command: str = "PYENV_VERSION=3.11.13 whisper"
+    align_command: str = "PYENV_VERSION=3.11.13 whisper" if _IS_MACOS else "whisper"
     align_model: str = "large-v3-turbo"
     captions_burn_in: bool = False  # stretch: burn word-level .ass captions
 
@@ -105,7 +120,7 @@ class PipelineConfig(BaseSettings):
     qa_max_audio_duration_overage_seconds: float = 4.0
     qa_min_transcript_similarity: float = 0.72
     qa_require_asr: bool = False
-    qa_asr_command: str = "PYENV_VERSION=3.11.13 whisper"
+    qa_asr_command: str = "PYENV_VERSION=3.11.13 whisper" if _IS_MACOS else "whisper"
     qa_asr_model: str = "large-v3-turbo"
     # "voicebox" routes QA transcription through the Voicebox app's /transcribe
     # endpoint (plain text; word timestamps are NOT available there, which is
@@ -125,7 +140,7 @@ class PipelineConfig(BaseSettings):
 
     # Paths
     output_dir: Path = Path("output")
-    temp_dir: Path = Path("/tmp/paper-to-video")
+    temp_dir: Path = Path(tempfile.gettempdir()) / "paper-to-video"
     voice_samples_dir: Path = Path("voice_samples")
 
     model_config = SettingsConfigDict(env_file=".env", env_prefix="PTV_")

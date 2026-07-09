@@ -1,22 +1,57 @@
-"""Text-to-speech generation via Qwen3-TTS (local, Apple Silicon).
+"""Text-to-speech generation via Qwen3-TTS (local), OS-aware.
 
-Uses the Qwen3-TTS installation at /Volumes/4TB-Z/programming/qwen-TTS/Qwen3-TTS.
-Supports custom voices, voice cloning, and multiple languages.
+The synthesis always runs as a subprocess so model memory is freed after each
+clip. Which interpreter runs it depends on the platform:
+
+- Apple Silicon: the dedicated Qwen3-TTS checkout/venv (config PTV_QWEN_TTS_DIR),
+  on MPS — the original setup.
+- Windows/Linux: this project's own interpreter (the ``qwen-tts`` package is a
+  dependency on non-mac platforms), on CUDA when available, else CPU.
+
+Same models either way: Qwen/Qwen3-TTS-12Hz-<size>-{CustomVoice,Base}.
 """
 
 import subprocess
-import tempfile
+import sys
 from pathlib import Path
-
-_QWEN_TTS_DIR = Path("/Volumes/4TB-Z/programming/qwen-TTS/Qwen3-TTS")
-_QWEN_PYTHON = _QWEN_TTS_DIR / ".venv" / "bin" / "python"
 
 SPEAKERS = ['aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'serena', 'sohee', 'uncle_fu', 'vivian']
 LANGUAGES = ['auto', 'chinese', 'english', 'french', 'german', 'italian', 'japanese', 'korean', 'portuguese', 'russian', 'spanish']
 
-# Pre-built voice clones available
+
+def _qwen_tts_dir() -> Path:
+    from src.config import PipelineConfig
+
+    return Path(PipelineConfig().qwen_tts_dir)
+
+
+def _runtime() -> tuple[str, str | None, str, str]:
+    """(python executable, cwd, device expression, dtype expression) per OS.
+
+    device/dtype are Python expressions evaluated inside the subprocess, so
+    CUDA detection happens in the process that actually loads the model.
+    """
+    from src.utils.hw import is_apple_silicon
+
+    if is_apple_silicon():
+        qwen_dir = _qwen_tts_dir()
+        return (
+            str(qwen_dir / ".venv" / "bin" / "python"),
+            str(qwen_dir),
+            '"mps"',
+            "torch.float32",
+        )
+    return (
+        sys.executable,
+        None,
+        '("cuda" if torch.cuda.is_available() else "cpu")',
+        '(torch.bfloat16 if torch.cuda.is_available() else torch.float32)',
+    )
+
+
+# Pre-built voice clones available (paths only exist on the original mac setup).
 CLONED_VOICES = {
-    "zachs_voice": str(_QWEN_TTS_DIR / "zachs_voice_17b_icl.pt"),
+    "zachs_voice": str(_qwen_tts_dir() / "zachs_voice_17b_icl.pt") if sys.platform == "darwin" else "",
 }
 
 
@@ -36,7 +71,9 @@ def generate_speech(
     output_path = Path(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Build a Python script to run in the Qwen TTS venv
+    python_exe, cwd, device_expr, dtype_expr = _runtime()
+
+    # Build a Python script to run in the TTS interpreter
     if ref_audio:
         # Voice clone mode
         script = f'''
@@ -46,8 +83,8 @@ from qwen_tts import Qwen3TTSModel
 
 model = Qwen3TTSModel.from_pretrained(
     {repr(f"Qwen/Qwen3-TTS-12Hz-{model_size}-Base")},
-    device_map="mps",
-    dtype=torch.float32,
+    device_map={device_expr},
+    dtype={dtype_expr},
 )
 wavs, sr = model.generate_voice_clone(
     text={repr(text)},
@@ -69,8 +106,8 @@ from qwen_tts import Qwen3TTSModel
 
 model = Qwen3TTSModel.from_pretrained(
     {repr(f"Qwen/Qwen3-TTS-12Hz-{model_size}-CustomVoice")},
-    device_map="mps",
-    dtype=torch.float32,
+    device_map={device_expr},
+    dtype={dtype_expr},
 )
 wavs, sr = model.generate_custom_voice(
     text={repr(text)},
@@ -84,9 +121,9 @@ print("OK")
 
     try:
         proc = subprocess.run(
-            [str(_QWEN_PYTHON), "-c", script],
-            capture_output=True, text=True, timeout=300,
-            cwd=str(_QWEN_TTS_DIR),
+            [python_exe, "-c", script],
+            capture_output=True, text=True, timeout=900,  # first run downloads the model
+            cwd=cwd,
         )
         if proc.returncode != 0 or not output_path.exists():
             tail = (proc.stderr or proc.stdout or "")[-500:]
@@ -95,7 +132,7 @@ print("OK")
         return {"success": True, "output_path": str(output_path), "error": None}
     except subprocess.TimeoutExpired:
         return {"success": False, "output_path": str(output_path),
-                "error": "Qwen TTS timed out after 300s"}
+                "error": "Qwen TTS timed out after 900s"}
     except Exception as e:
         return {"success": False, "output_path": str(output_path),
                 "error": str(e)}
