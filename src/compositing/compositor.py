@@ -202,7 +202,7 @@ class VideoCompositor:
                 # expressed in the already-retimed (post-setpts) timeline.
                 pad_seconds = gap / speed + 0.1
                 vf_parts.append(f"tpad=stop_mode=clone:stop_duration={pad_seconds:.2f}")
-            if gap > 5.0 or gap / video_duration > 0.10:
+            if abs(gap) > 5.0 or abs(gap) / video_duration > 0.10:
                 console.print(
                     f"[bold red]AV duration mismatch for {video_path.name}: "
                     f"video={video_duration:.2f}s audio={audio_duration:.2f}s "

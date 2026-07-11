@@ -141,6 +141,38 @@ def test_merge_av_real_video_shorter_than_audio_pads_not_truncates(tmp_path: Pat
 
 
 @pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg/ffprobe not installed")
+def test_merge_av_real_video_much_longer_than_audio_warns(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    """A video much longer than its narration must still trigger the AV
+    mismatch warning -- the check must be symmetric, not just audio > video.
+
+    Audio is 3s (not shorter) because ffmpeg's loudnorm filter produces NaN
+    output on pure digital silence (anullsrc) shorter than ~3s, which is an
+    unrelated ffmpeg quirk, not the behavior under test here.
+    """
+    video_path = tmp_path / "v.mp4"
+    audio_path = tmp_path / "a.mp3"
+    out_path = tmp_path / "out.mp4"
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "color=c=blue:s=320x240:d=15",
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", str(video_path)],
+        check=True, capture_output=True,
+    )
+    subprocess.run(
+        ["ffmpeg", "-y", "-f", "lavfi", "-i", "anullsrc=r=48000:cl=stereo",
+         "-t", "3", str(audio_path)],
+        check=True, capture_output=True,
+    )
+
+    compositor = VideoCompositor()
+    compositor._merge_av(video_path, audio_path, out_path)
+    out = capsys.readouterr().out
+
+    assert "AV duration mismatch" in out
+
+
+@pytest.mark.skipif(not HAS_FFMPEG, reason="ffmpeg/ffprobe not installed")
 def test_merge_av_real_audio_shorter_than_video_pads_not_truncates(tmp_path: Path) -> None:
     """A narration shorter than its video must not truncate the video down to
     the narration's length -- the visual content must play in full."""
