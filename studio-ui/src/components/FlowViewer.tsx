@@ -20,6 +20,9 @@ interface FlowViewerProps {
   /** The currently selected style preset's id, sent along with Produce so
    * production picks up the preset's voice/quality/video-provider overrides. */
   activePresetId?: string | null
+  /** Whether this viewer's tab is currently visible — gates the background
+   * production poll so a hidden tab doesn't keep hitting the API. */
+  active: boolean
 }
 
 function inProject(run: RunSummary, projectId: string | null): boolean {
@@ -223,7 +226,7 @@ function qaBadgeText(qa: RunQA): string {
 
 // ── FlowViewer ───────────────────────────────────────────────────────────────
 
-export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChange, activePresetId }: FlowViewerProps) {
+export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChange, activePresetId, active }: FlowViewerProps) {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const projectRuns = runs.filter((r) => inProject(r, currentProjectId))
@@ -338,13 +341,24 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
   }, [artifactRefreshRunId, selectedId, loadDetail])
 
   useEffect(() => {
-    if (!selectedId || detail?.production?.status !== 'running') return
+    if (!selectedId || !active || detail?.production?.status !== 'running') return
     const timer = window.setInterval(() => {
       loadDetail(selectedId, false)
       fetchRuns().then(setRuns).catch(() => {})
     }, 3000)
     return () => window.clearInterval(timer)
-  }, [detail?.production?.status, loadDetail, selectedId])
+  }, [active, detail?.production?.status, loadDetail, selectedId])
+
+  // Switching back to this tab shouldn't wait up to 3s for the first refresh
+  // of a production that kept running while the tab was hidden.
+  const wasActiveRef = useRef(active)
+  useEffect(() => {
+    const wasActive = wasActiveRef.current
+    wasActiveRef.current = active
+    if (active && !wasActive && selectedId && detail?.production?.status === 'running') {
+      loadDetail(selectedId, false)
+    }
+  }, [active, detail?.production?.status, loadDetail, selectedId])
 
   // ── Handlers ─────────────────────────────────────────────────────────────
   function handleRunChange(e: React.ChangeEvent<HTMLSelectElement>) {

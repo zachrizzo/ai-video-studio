@@ -95,6 +95,7 @@ export default function App() {
             currentProjectId={currentProject?.id ?? null}
             onRunIdChange={handleRunChange}
             activePresetId={activePreset?.id ?? null}
+            active={activeTab === 'story'}
           />
         </div>
       </div>

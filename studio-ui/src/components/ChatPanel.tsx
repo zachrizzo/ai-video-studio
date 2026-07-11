@@ -289,7 +289,9 @@ function loadConversations(): Conversation[] {
 }
 
 function saveConversations(convos: Conversation[]) {
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(normalizeConversations(convos)))
+  // Callers (commitConversations) already normalize before calling this, so
+  // re-normalizing here would just redo the same work on every commit.
+  localStorage.setItem(STORAGE_KEY, JSON.stringify(convos))
 }
 
 function newConvoId() {
@@ -330,10 +332,17 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
   const activeConversation = conversations.find(c => c.id === activeConvoId) || null
   const messages = activeConversation?.messages || []
 
+  // localStorage is a convenience cache (the server transcript is the source
+  // of truth), but commitConversations fires on every streamed token during a
+  // turn — writing synchronously that often is wasteful. Debounce the write
+  // only; setConversations itself stays synchronous so the UI still renders
+  // every token immediately.
+  const saveDebounceRef = useRef<number | null>(null)
   const commitConversations = useCallback((mutate: (prev: Conversation[]) => Conversation[]) => {
     setConversations(prev => {
       const updated = normalizeConversations(mutate(prev))
-      saveConversations(updated)
+      if (saveDebounceRef.current != null) window.clearTimeout(saveDebounceRef.current)
+      saveDebounceRef.current = window.setTimeout(() => saveConversations(updated), 250)
       return updated
     })
   }, [])
@@ -403,6 +412,16 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
   const conversationsRef = useRef(conversations)
   useEffect(() => { conversationsRef.current = conversations }, [conversations])
   const messagesEndRef = useRef<HTMLDivElement>(null)
+  const messagesContainerRef = useRef<HTMLDivElement>(null)
+  // Tracks whether the user is scrolled to (near) the bottom, so a streamed
+  // response doesn't yank the view back down while they've scrolled up to
+  // read earlier messages.
+  const stickToBottomRef = useRef(true)
+  const handleMessagesScroll = useCallback(() => {
+    const el = messagesContainerRef.current
+    if (!el) return
+    stickToBottomRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 80
+  }, [])
   // currentRunId can change; keep a ref so the send handler always sees the latest.
   const runIdRef = useRef<string | null>(currentRunId)
   useEffect(() => { runIdRef.current = currentRunId }, [currentRunId])
@@ -799,9 +818,15 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
   }, [])
 
   // ── Auto-scroll to the newest message ───────────────────────────────────────
+  // Only when the user is stuck to the bottom — otherwise a streamed response
+  // fights their manual scroll-up on every token. Instant scroll while busy
+  // avoids queuing up a smooth animation on every token; smooth once settled.
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+    if (!stickToBottomRef.current) return
+    requestAnimationFrame(() => {
+      messagesEndRef.current?.scrollIntoView({ behavior: busy ? 'auto' : 'smooth' })
+    })
+  }, [messages, busy])
 
   // ── Send a user message ─────────────────────────────────────────────────────
   function send() {
@@ -943,7 +968,7 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
         </div>
       )}
 
-      <div className="chat-messages">
+      <div className="chat-messages" ref={messagesContainerRef} onScroll={handleMessagesScroll}>
         {messages.length === 0 && (
           <div className="empty-state">
             <div className="empty-state-icon"><EmptyChatIcon /></div>
