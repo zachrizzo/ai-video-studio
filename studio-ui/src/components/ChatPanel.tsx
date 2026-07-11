@@ -655,8 +655,8 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
         case 'artifact_updated':
           if (targetId && msg.run_id && msg.run_id !== 'unknown') {
             bindConversationToRun(targetId, msg.run_id)
+            onArtifactUpdated(msg.run_id)
           }
-          onArtifactUpdated(msg.run_id)
           break
         case 'resumed': {
           // The server reclaimed a turn that outlived a disconnect; go back
@@ -687,7 +687,7 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
           }
           break
         }
-        case 'done':
+        case 'done': {
           if (targetId && msg.run_id && msg.run_id !== 'unknown') {
             bindConversationToRun(targetId, msg.run_id)
           }
@@ -698,15 +698,24 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
             tools: m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'done' as ToolStatus } : t)),
           }))
           if (targetId) delete activeAssistantIds.current[targetId]
-          inFlightConvoId.current = null
-          setBusy(false)
+          // A done/error frame for a conversation OTHER than the one actually
+          // in flight (e.g. the initial-connect resume probe replying `done`
+          // for an idle conversation after the user already started a new
+          // turn elsewhere) must not clobber that real in-flight turn's busy
+          // state. When nothing is in flight, clearing again is a harmless
+          // no-op, so that case stays unguarded.
+          if (inFlightConvoId.current === null || targetId === inFlightConvoId.current) {
+            inFlightConvoId.current = null
+            setBusy(false)
+          }
           if (targetId && interruptedConvosRef.current.has(targetId)) {
             interruptedConvosRef.current.delete(targetId)
             delete interruptNoteIds.current[targetId]
             forceHydrateFromServer(targetId)
           }
           break
-        case 'error':
+        }
+        case 'error': {
           if (targetId) {
             updateConversationMessages(targetId, (prev) => [
               ...prev,
@@ -714,14 +723,17 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
             ])
             delete activeAssistantIds.current[targetId]
           }
-          inFlightConvoId.current = null
-          setBusy(false)
+          if (inFlightConvoId.current === null || targetId === inFlightConvoId.current) {
+            inFlightConvoId.current = null
+            setBusy(false)
+          }
           if (targetId && interruptedConvosRef.current.has(targetId)) {
             interruptedConvosRef.current.delete(targetId)
             delete interruptNoteIds.current[targetId]
             forceHydrateFromServer(targetId)
           }
           break
+        }
       }
     },
     [bindConversationToRun, commitConversations, forceHydrateFromServer, onArtifactUpdated, updateAssistantForConversation, updateConversationMessages],
@@ -816,7 +828,10 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
             ? {
                 ...c,
                 title: c.title || title,
-                runId: c.runId || runId,
+                // A conversation's own runId is only ever set by
+                // bindConversationToRun (from artifact_updated/done frames),
+                // never pre-seeded from the currently-viewed run.
+                runId: c.runId,
                 projectId: c.projectId || projectId,
                 messages: [...c.messages, userMsg, assistantMsg],
                 createdAt: Date.now(),
@@ -829,7 +844,7 @@ export function ChatPanel({ currentRunId, currentProjectId, serverConversations,
         title,
         messages: [userMsg, assistantMsg],
         createdAt: Date.now(),
-        runId,
+        runId: null,
         claudeSessionId: null,
         projectId,
       }, ...prev]

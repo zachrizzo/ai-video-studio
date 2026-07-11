@@ -57,6 +57,50 @@ def _snapshot_run_scripts() -> dict[str, float]:
     return mtimes
 
 
+def _is_run_binding_tool(tool_name: str) -> bool:
+    """Whether a tool call may bind a conversation/viewer to a run.
+
+    Only tools that mutate a run's on-disk state qualify — reads (get_run,
+    production_status, list_runs, ...) and one-shot generation tools
+    (generate_video, tts, ...) operate outside any run's directory and must
+    never snap the viewer or bind a chat.
+    """
+    return tool_name in _ARTIFACT_TOOLS or tool_name in _MUTATING_STUDIO_TOOLS
+
+
+def _record_tool_run_id(
+    tool_name: str,
+    tool_input: dict[str, Any],
+    conversation_id: str,
+    active_run_ids_by_conversation: dict[str, str],
+    seen_run_ids: set[str],
+) -> str | None:
+    """Update run-tracking state for one PostToolUse event.
+
+    Returns the run id touched only when the tool call both binds (mutates a
+    run) and carries a parseable run id — the caller emits artifact_updated
+    only in that case.
+    """
+    if not _is_run_binding_tool(tool_name):
+        return None
+    run_id = _extract_run_id(tool_input)
+    if not run_id:
+        return None
+    active_run_ids_by_conversation[conversation_id] = run_id
+    seen_run_ids.add(run_id)
+    return run_id
+
+
+def _reported_run_id(
+    conversation_id: str,
+    active_run_ids_by_conversation: dict[str, str],
+    seen_run_ids: set[str],
+) -> str | None:
+    """The run id to echo in the `done` frame — only one this turn touched."""
+    run_id = active_run_ids_by_conversation.get(conversation_id)
+    return run_id if run_id in seen_run_ids else None
+
+
 def _select_changed_runs(
     before: dict[str, float],
     after: dict[str, float],
@@ -363,6 +407,35 @@ def _stringify_tool_result(content: Any) -> str:
 
 _ARTIFACT_TOOLS = frozenset({"Write", "Edit", "Bash", "MultiEdit"})
 
+# Studio tools that mutate a run's on-disk state (script.json, storyboard.json,
+# audio/, images/, clips/, composite_manifest.json, final.mp4, qa_report.json,
+# or the production status file). Only these may bind a conversation/viewer to
+# a run; everything else in STUDIO_TOOL_NAMES (list_runs, get_run,
+# list_projects, capabilities, production_status, generate_image,
+# generate_video, retake_video, extend_video, video_hdr, tts,
+# generation_status, list_generations) is read-only or a one-shot generation
+# outside any run's directory. Covered by a subset test against
+# STUDIO_TOOL_NAMES so a future tool rename can't silently fall out of this.
+_MUTATING_STUDIO_TOOLS = frozenset(
+    f"mcp__studio__{name}"
+    for name in (
+        "create_run",
+        "storyboard",
+        "synthesize",
+        "align",
+        "sfx",
+        "assets",
+        "collage",
+        "imagegen",
+        "videogen",
+        "manifest",
+        "composite",
+        "qa",
+        "produce_run",
+        "stop_production",
+    )
+)
+
 
 async def handle_ws(websocket: WebSocket) -> None:
     """Accept a WebSocket connection and drive a Claude Agent SDK session."""
@@ -373,12 +446,12 @@ async def handle_ws(websocket: WebSocket) -> None:
     active_run_ids_by_conversation: dict[str, str] = {}
     project_ids_by_conversation: dict[str, str] = {}
     active_conversation_id = "default"
-    # Run ids seen in this turn's tool inputs; the end-of-turn artifact scan
-    # only trusts runs the turn actually touched.
-    seen_run_ids_this_turn: set[str] = set()
-    # The current turn's holder, so the PostToolUse hook can stream artifact
-    # frames through whichever socket currently owns the turn.
-    hook_state: dict[str, Any] = {"holder": None}
+    # The current turn's holder and seen-run-id set, so the PostToolUse hook
+    # always reads/writes the state of whichever turn is presently running —
+    # each turn gets its own fresh set (threaded through per launch below)
+    # rather than sharing one across a connection's whole lifetime, so a
+    # detached turn's leftover state can't bleed into a later turn's scan.
+    hook_state: dict[str, Any] = {"holder": None, "seen_run_ids": set()}
     # Once a send fails the socket is gone; stop trying (avoids log spam from
     # a turn task that keeps streaming after the client disconnected).
     conn_state = {"closed": False}
@@ -444,24 +517,23 @@ async def handle_ws(websocket: WebSocket) -> None:
         _ctx: HookContext,
     ) -> dict[str, Any]:
         tool_name: str = hook_input.get("tool_name", "")
-        if tool_name in _ARTIFACT_TOOLS or tool_name.startswith("mcp__studio__"):
-            # Only a run id parsed from the tool input counts — falling back to
-            # the previously-viewed run made run-less tools (one-shot
-            # generate_video, generation_status, plain Bash) snap the viewer
-            # to an unrelated run and mis-bind new chats.
-            run_id = _extract_run_id(hook_input.get("tool_input", {}) or {})
-            if run_id:
-                active_run_ids_by_conversation[active_conversation_id] = run_id
-                seen_run_ids_this_turn.add(run_id)
-                holder = hook_state.get("holder")
-                if holder is not None:
-                    await holder["send"](
-                        {
-                            "type": "artifact_updated",
-                            "run_id": run_id,
-                            "conversation_id": active_conversation_id,
-                        }
-                    )
+        run_id = _record_tool_run_id(
+            tool_name,
+            hook_input.get("tool_input", {}) or {},
+            active_conversation_id,
+            active_run_ids_by_conversation,
+            hook_state["seen_run_ids"],
+        )
+        if run_id:
+            holder = hook_state.get("holder")
+            if holder is not None:
+                await holder["send"](
+                    {
+                        "type": "artifact_updated",
+                        "run_id": run_id,
+                        "conversation_id": active_conversation_id,
+                    }
+                )
         return {}
 
     # In-process MCP server exposing the typed studio tools (stateless; one
@@ -480,6 +552,7 @@ async def handle_ws(websocket: WebSocket) -> None:
         user_text: str,
         options: Any,
         holder: dict[str, Any],
+        seen_run_ids: set[str],
     ) -> None:
         async def _emit(msg: dict[str, Any]) -> None:
             # Route through the holder so a reconnected socket that claimed
@@ -671,7 +744,7 @@ async def handle_ws(websocket: WebSocket) -> None:
         # else that changed concurrently (terminal work, another tab) is
         # ignored rather than hijacking the selection.
         changed_runs = _select_changed_runs(
-            runs_before_query, runs_after_query, seen_run_ids_this_turn
+            runs_before_query, runs_after_query, seen_run_ids
         )
         if changed_runs:
             changed_run_id = changed_runs[0][0]
@@ -699,7 +772,9 @@ async def handle_ws(websocket: WebSocket) -> None:
             {
                 "type": "done",
                 "conversation_id": conversation_id,
-                "run_id": active_run_ids_by_conversation.get(conversation_id),
+                "run_id": _reported_run_id(
+                    conversation_id, active_run_ids_by_conversation, seen_run_ids
+                ),
                 "stopped": bool(holder.get("stopped")),
             }
         )
@@ -796,9 +871,11 @@ async def handle_ws(websocket: WebSocket) -> None:
             requested_session_id = msg.get("session_id")
             if not isinstance(requested_session_id, str) or not requested_session_id:
                 requested_session_id = session_ids_by_conversation.get(conversation_id)
-            msg_run_id = msg.get("run_id")
-            if isinstance(msg_run_id, str) and msg_run_id:
-                active_run_ids_by_conversation[conversation_id] = msg_run_id
+            # Note: the client's own `run_id` (the run currently shown in the
+            # viewer) is intentionally NOT used to pre-seed
+            # active_run_ids_by_conversation — only a tool call that actually
+            # mutates a run may bind the conversation to it (see
+            # _record_tool_run_id / _reported_run_id above).
 
             # Track the conversation's project and inject project context so
             # every chat in a project shares awareness of its videos.
@@ -997,11 +1074,12 @@ async def handle_ws(websocket: WebSocket) -> None:
                 },
             )
 
-            seen_run_ids_this_turn.clear()
+            turn_seen_run_ids: set[str] = set()
+            hook_state["seen_run_ids"] = turn_seen_run_ids
             holder: dict[str, Any] = {"client": None, "stopped": False, "send": _send}
             hook_state["holder"] = holder
             task = asyncio.create_task(
-                _run_turn(conversation_id, user_text, options, holder)
+                _run_turn(conversation_id, user_text, options, holder, turn_seen_run_ids)
             )
             current_turn = {
                 "task": task,

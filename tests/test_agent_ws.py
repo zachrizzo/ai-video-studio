@@ -8,7 +8,17 @@ can't hijack the viewer or mis-bind a chat.
 
 from pathlib import Path
 
-from src.studio.agent import _extract_run_id, _select_changed_runs, _snapshot_run_scripts
+from src.studio.agent import (
+    _ARTIFACT_TOOLS,
+    _MUTATING_STUDIO_TOOLS,
+    _extract_run_id,
+    _is_run_binding_tool,
+    _record_tool_run_id,
+    _reported_run_id,
+    _select_changed_runs,
+    _snapshot_run_scripts,
+)
+from src.studio.agent_tools import STUDIO_TOOL_NAMES
 
 
 # ---------------------------------------------------------------------------
@@ -84,3 +94,128 @@ def test_snapshot_run_scripts_uses_runs_root(tmp_path: Path, monkeypatch) -> Non
 
     assert set(snapshot) == {"run_abc123"}
     assert snapshot["run_abc123"] > 0
+
+
+# ---------------------------------------------------------------------------
+# Run-binding semantics: only mutation binds
+#
+# A read-only question about a run (get_run, production_status, ...) must
+# never snap the FlowViewer or bind a chat conversation to that run — only a
+# tool call that actually mutates a run's on-disk state may do that. These
+# tests drive the same pure helpers the PostToolUse hook and end-of-turn
+# `done` frame call, since exercising the hook itself requires a live Claude
+# Agent SDK session.
+# ---------------------------------------------------------------------------
+
+
+def test_mutating_studio_tools_is_subset_of_registered_tool_names() -> None:
+    # A future rename of a studio tool must not silently drop it out of the
+    # mutating set (which would make a real mutation stop binding) nor leave
+    # a stale name in it (which would make a read-only tool wrongly bind).
+    registered = {f"mcp__studio__{name}" for name in STUDIO_TOOL_NAMES}
+    assert _MUTATING_STUDIO_TOOLS <= registered
+
+
+def test_mutating_studio_tools_excludes_read_only_and_one_shot_tools() -> None:
+    read_only_or_one_shot = {
+        "mcp__studio__list_runs",
+        "mcp__studio__get_run",
+        "mcp__studio__list_projects",
+        "mcp__studio__capabilities",
+        "mcp__studio__production_status",
+        "mcp__studio__generate_image",
+        "mcp__studio__generate_video",
+        "mcp__studio__retake_video",
+        "mcp__studio__extend_video",
+        "mcp__studio__video_hdr",
+        "mcp__studio__tts",
+        "mcp__studio__generation_status",
+        "mcp__studio__list_generations",
+    }
+    assert not (_MUTATING_STUDIO_TOOLS & read_only_or_one_shot)
+
+
+def test_is_run_binding_tool_true_for_mutating_and_artifact_tools() -> None:
+    assert _is_run_binding_tool("mcp__studio__imagegen") is True
+    assert _is_run_binding_tool("mcp__studio__create_run") is True
+    for name in _ARTIFACT_TOOLS:
+        assert _is_run_binding_tool(name) is True
+
+
+def test_is_run_binding_tool_false_for_read_only_studio_tools() -> None:
+    assert _is_run_binding_tool("mcp__studio__get_run") is False
+    assert _is_run_binding_tool("mcp__studio__production_status") is False
+    assert _is_run_binding_tool("mcp__studio__list_runs") is False
+
+
+def test_record_tool_run_id_ignores_read_only_tool_call() -> None:
+    # A get_run/production_status-shaped call carries a run_id but must not
+    # bind the conversation or count as "seen" for this turn.
+    active_run_ids: dict[str, str] = {}
+    seen: set[str] = set()
+
+    result = _record_tool_run_id(
+        "mcp__studio__get_run",
+        {"run_id": "run_abcdef12"},
+        "conv-1",
+        active_run_ids,
+        seen,
+    )
+
+    assert result is None
+    assert active_run_ids == {}
+    assert seen == set()
+
+
+def test_record_tool_run_id_binds_on_mutating_tool_call() -> None:
+    # An imagegen/create_run-shaped mutating call DOES bind the conversation
+    # and mark the run as seen this turn.
+    active_run_ids: dict[str, str] = {}
+    seen: set[str] = set()
+
+    result = _record_tool_run_id(
+        "mcp__studio__imagegen",
+        {"run_id": "run_abcdef12"},
+        "conv-1",
+        active_run_ids,
+        seen,
+    )
+
+    assert result == "run_abcdef12"
+    assert active_run_ids == {"conv-1": "run_abcdef12"}
+    assert seen == {"run_abcdef12"}
+
+
+def test_record_tool_run_id_none_when_no_run_id_parseable() -> None:
+    active_run_ids: dict[str, str] = {}
+    seen: set[str] = set()
+
+    result = _record_tool_run_id(
+        "mcp__studio__imagegen",
+        {"prompt": "a knight rides at dawn"},
+        "conv-1",
+        active_run_ids,
+        seen,
+    )
+
+    assert result is None
+    assert active_run_ids == {}
+    assert seen == set()
+
+
+def test_reported_run_id_null_when_turn_touched_no_run() -> None:
+    # Even if the conversation has a stale/previously-bound run id (e.g. from
+    # a prior turn), a turn that touched no run this time must report None —
+    # this is what makes removing the client run_id pre-seeding effective:
+    # a read-only turn on a client-supplied run_id must not echo it back.
+    active_run_ids = {"conv-1": "run_stale0001"}
+    seen: set[str] = set()
+
+    assert _reported_run_id("conv-1", active_run_ids, seen) is None
+
+
+def test_reported_run_id_returns_run_when_seen_this_turn() -> None:
+    active_run_ids = {"conv-1": "run_abcdef12"}
+    seen = {"run_abcdef12"}
+
+    assert _reported_run_id("conv-1", active_run_ids, seen) == "run_abcdef12"
