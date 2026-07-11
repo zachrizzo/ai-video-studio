@@ -51,3 +51,37 @@ def test_saved_preset_keeps_generation_settings(presets_file: Path) -> None:
         if key == "id":
             continue
         assert saved[key] == value, f"{key} was dropped or changed on save"
+
+
+def test_partial_save_of_builtin_preset_preserves_untouched_fields(presets_file: Path) -> None:
+    """Regression: editing a single field on a built-in preset used to
+    replace the whole custom entry with a full PresetSaveRequest dump, which
+    silently reset every other field to that request model's hardcoded
+    defaults (video_length_minutes=2, video_provider="kenburns", etc.)
+    instead of leaving the built-in preset's actual values in place."""
+    from starlette.testclient import TestClient
+
+    from src.studio.server import app
+
+    client = TestClient(app)
+
+    # cinematic_documentary's built-in values: video_length_minutes=3,
+    # voice_speaker="eric", video_provider="ltx" — none of which match
+    # PresetSaveRequest's hardcoded defaults (2, "serena", "kenburns").
+    body = {
+        "id": "cinematic_documentary",
+        "name": "Cinematic Documentary",
+        "voice_speaker": "dylan",
+    }
+    r = client.post("/api/presets", json=body)
+    assert r.status_code == 200
+
+    r = client.get("/api/presets/cinematic_documentary")
+    assert r.status_code == 200
+    saved = r.json()
+    assert saved["voice_speaker"] == "dylan"
+    assert saved["video_length_minutes"] == 3
+    assert saved["video_provider"] == "ltx"
+    assert saved["voice_language"] == "english"
+    assert saved["tts_provider"] == "voicebox"
+    assert saved["voicebox_profile"] == "Eric"

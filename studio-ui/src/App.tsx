@@ -94,6 +94,7 @@ export default function App() {
             artifactRefreshRunId={artifactRefreshRunId}
             currentProjectId={currentProject?.id ?? null}
             onRunIdChange={handleRunChange}
+            activePresetId={activePreset?.id ?? null}
           />
         </div>
       </div>

@@ -13,9 +13,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from src.studio import presets
 from src.studio.runs import _runs_root
 
 STATUS_FILE = ".production_status.json"
+PRESET_SNAPSHOT_FILE = ".production_preset.json"
 MAX_LOG_LINE_CHARS = 2000
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -332,6 +334,7 @@ def _run_production(
     force_video: bool,
     segment_ids: str,
     speed: float | None,
+    preset: dict[str, Any] | None,
 ) -> None:
     steps = _pipeline_steps(run_dir, mode, segment_ids)
     status = _initial_status(run_id, len(steps), mode, force_video, segment_ids)
@@ -339,8 +342,11 @@ def _run_production(
 
     # Video provider / LTX settings come from PipelineConfig defaults (env or
     # .env overrides included) — do not re-pin them here, or the two defaults
-    # can silently drift apart.
+    # can silently drift apart. A resolved preset's env overrides those
+    # defaults; explicit per-call force/speed still win over the preset.
     env = os.environ.copy()
+    if preset is not None:
+        env.update(presets.preset_env(preset))
     if force_video:
         env["PTV_VIDEO_FORCE"] = "true"
     if speed is not None:
@@ -419,12 +425,37 @@ def _run_production(
         _ACTIVE.pop(run_id, None)
 
 
+def _resolve_production_preset(run_dir: Path, preset_id: str) -> dict[str, Any] | None:
+    """Resolve the preset to use for this production call.
+
+    A truthy preset_id is looked up and snapshotted to disk so a later resume
+    (mode="videos"/"clips", or a subsequent call with no preset_id) keeps
+    using the same preset. Otherwise, reuse a snapshot from a prior call if
+    one exists; if neither is present, return None (today's behavior — no
+    preset env at all).
+    """
+    snapshot_path = run_dir / PRESET_SNAPSHOT_FILE
+    if preset_id:
+        preset = presets.get_preset(preset_id)
+        if preset is None:
+            raise ValueError(f"unknown preset: {preset_id!r}")
+        snapshot_path.write_text(json.dumps(preset, indent=2), encoding="utf-8")
+        return preset
+    if snapshot_path.exists():
+        try:
+            return json.loads(snapshot_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+    return None
+
+
 def start_run_production(
     run_id: str,
     mode: str = "full",
     force_video: bool = False,
     segment_ids: str = "",
     speed: float | None = None,
+    preset_id: str = "",
 ) -> dict[str, Any]:
     """Start or return the existing production job for a run."""
     run_dir = _safe_run_dir(run_id)
@@ -435,6 +466,7 @@ def start_run_production(
     segment_ids = ",".join(item.strip() for item in segment_ids.split(",") if item.strip())
     # Validate before creating a thread/status file.
     steps = _pipeline_steps(run_dir, mode, segment_ids)
+    preset = _resolve_production_preset(run_dir, preset_id)
 
     active = _ACTIVE.get(run_id)
     if active and active.thread.is_alive():
@@ -443,7 +475,7 @@ def start_run_production(
     job_ref: dict[str, ProductionJob] = {}
     thread = threading.Thread(
         target=_run_production,
-        args=(run_id, run_dir, job_ref, mode, force_video, segment_ids, speed),
+        args=(run_id, run_dir, job_ref, mode, force_video, segment_ids, speed, preset),
         daemon=True,
         name=f"run-producer-{run_id}-{mode}",
     )

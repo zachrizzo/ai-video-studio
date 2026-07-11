@@ -4,6 +4,19 @@ import json
 
 from src.studio import config
 
+
+def split_resolution(resolution: str) -> tuple[str, str] | None:
+    """Split a "WIDTHxHEIGHT" string into normalized (width_str, height_str),
+    or None if malformed. Shared by agent_tools.videogen_tool and preset_env
+    so the two can't drift apart on how a resolution string maps to LTX env
+    vars.
+    """
+    try:
+        width_str, height_str = resolution.lower().split("x", 1)
+        return str(int(width_str)), str(int(height_str))
+    except ValueError:
+        return None
+
 DEFAULT_PRESETS = {
     "stick_figure_history": {
         "name": "Stick Figure History",
@@ -161,3 +174,60 @@ def delete_preset(preset_id: str) -> bool:
         _save_all(custom)
         return True
     return False
+
+
+# Preset key -> PTV_* env var, for values that just need str()/bool-string
+# conversion. voice_language deliberately has no entry: presets store a full
+# word ("english") while PTV_VOICEBOX_LANGUAGE wants an ISO code ("en"), so
+# mapping it there would silently break Voicebox synthesis. ltx_resolution is
+# handled separately (splits into two env vars via split_resolution).
+_ENV_STR_KEYS = {
+    "tts_provider": "PTV_VOICE_PROVIDER",
+    "voicebox_profile": "PTV_VOICEBOX_PROFILE",
+    "voice_speaker": "PTV_QWEN_TTS_SPEAKER",
+    "voice_language": "PTV_QWEN_TTS_LANGUAGE",
+    "qwen_model_size": "PTV_QWEN_TTS_MODEL_SIZE",
+    "image_model": "PTV_IMAGE_MODEL",
+    "video_provider": "PTV_VIDEO_PROVIDER",
+}
+_ENV_NUM_KEYS = {
+    "image_steps": "PTV_IMAGE_STEPS",
+    "image_quantize": "PTV_IMAGE_QUANTIZE",
+    "ltx_steps": "PTV_LTX_STEPS",
+    "ltx_clip_seconds": "PTV_LTX_CLIP_SECONDS",
+    "ltx_cfg_scale": "PTV_LTX_CFG_SCALE",
+    "ltx_stg_scale": "PTV_LTX_STG_SCALE",
+    "kenburns_zoom": "PTV_KENBURNS_ZOOM",
+}
+_ENV_BOOL_KEYS = {
+    "ltx_prefer_extend": "PTV_LTX_PREFER_EXTEND",
+    "video_fallback_to_kenburns": "PTV_VIDEO_FALLBACK_TO_KENBURNS",
+}
+
+
+def preset_env(preset: dict) -> dict[str, str]:
+    """Map a resolved preset dict (as returned by get_preset/list_presets) to
+    the PTV_* env vars that steer production. Keys absent or None in the
+    preset are skipped so they fall through to the pipeline's own defaults.
+    """
+    env: dict[str, str] = {}
+    for key, var in _ENV_STR_KEYS.items():
+        value = preset.get(key)
+        if value is not None:
+            env[var] = str(value)
+    for key, var in _ENV_NUM_KEYS.items():
+        value = preset.get(key)
+        if value is not None:
+            env[var] = str(value)
+    for key, var in _ENV_BOOL_KEYS.items():
+        value = preset.get(key)
+        if value is not None:
+            env[var] = "true" if value else "false"
+    resolution = preset.get("ltx_resolution")
+    if resolution:
+        split = split_resolution(resolution)
+        if split is not None:
+            width_str, height_str = split
+            env["PTV_LTX_GEN_WIDTH"] = width_str
+            env["PTV_LTX_GEN_HEIGHT"] = height_str
+    return env

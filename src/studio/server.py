@@ -193,15 +193,23 @@ class VideoHDRRequest(BaseModel):
     api_key: str | None = None
 
 class PresetSaveRequest(BaseModel):
+    """Fields below have no hard defaults (all `| None`) so
+    `model_dump(exclude_unset=True)` in api_save_preset is honest — a field
+    the client didn't send is genuinely absent, not silently present because
+    Pydantic manufactured a default value for it. api_save_preset merges the
+    result over the preset's existing/built-in values, so an absent field
+    keeps whatever it already was rather than getting reset.
+    """
+
     id: str
     name: str
-    description: str = ""
-    style_prompt: str = ""
-    video_length_minutes: int = 2
-    voice_speaker: str = "serena"
-    voice_language: str = "english"
-    video_provider: str = "kenburns"
-    narration_style: str = ""
+    description: str | None = None
+    style_prompt: str | None = None
+    video_length_minutes: int | None = None
+    voice_speaker: str | None = None
+    voice_language: str | None = None
+    video_provider: str | None = None
+    narration_style: str | None = None
     # Optional fields that api_save_preset persists via req.model_dump(); declare
     # them so custom presets stop silently dropping these on save.
     style_pack: str | None = None
@@ -240,6 +248,7 @@ class ProduceRunRequest(BaseModel):
     force_video: bool = False
     segment_ids: str = ""
     speed: float | None = None
+    preset_id: str = ""
 
 
 # ---------------------------------------------------------------------------
@@ -399,6 +408,7 @@ async def api_start_run_production(
             force_video=options.force_video,
             segment_ids=options.segment_ids,
             speed=options.speed,
+            preset_id=options.preset_id,
         )
     except FileNotFoundError:
         raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found") from None
@@ -628,8 +638,17 @@ async def api_get_preset(preset_id: str) -> dict:
 
 @app.post("/api/presets")
 async def api_save_preset(req: PresetSaveRequest) -> dict:
-    data = req.model_dump(exclude={"id"})
-    return save_preset(req.id, data)
+    """Merge only the fields the client actually sent over the preset's
+    existing (custom or built-in) values, so editing one field on a preset —
+    built-in or custom — can't silently reset every other field to this
+    request model's defaults.
+    """
+    incoming = req.model_dump(exclude={"id"}, exclude_unset=True)
+    base = get_preset(req.id) or {}
+    base.pop("id", None)
+    base.pop("builtin", None)
+    merged = {**base, **incoming}
+    return save_preset(req.id, merged)
 
 
 @app.delete("/api/presets/{preset_id}")

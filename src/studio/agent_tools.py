@@ -18,6 +18,8 @@ from typing import Any
 
 from claude_agent_sdk import create_sdk_mcp_server, tool
 
+from src.studio.presets import split_resolution
+
 # Repository root (two levels up from this file: src/studio/agent_tools.py)
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _OUTPUT_TAIL_CHARS = 4000
@@ -325,12 +327,10 @@ async def videogen_tool(args: dict[str, Any]) -> dict[str, Any]:
         env["PTV_LTX_STEPS"] = str(args["steps"])
     resolution = args.get("resolution", "")
     if resolution:
-        try:
-            width_str, height_str = resolution.lower().split("x", 1)
-            env["PTV_LTX_GEN_WIDTH"] = str(int(width_str))
-            env["PTV_LTX_GEN_HEIGHT"] = str(int(height_str))
-        except ValueError:
+        split = split_resolution(resolution)
+        if split is None:
             return _err(f"invalid resolution {resolution!r} — expected 'WIDTHxHEIGHT', e.g. '704x448'")
+        env["PTV_LTX_GEN_WIDTH"], env["PTV_LTX_GEN_HEIGHT"] = split
     if args.get("clip_seconds") is not None:
         env["PTV_LTX_CLIP_SECONDS"] = str(args["clip_seconds"])
     if args.get("cfg_scale") is not None:
@@ -441,9 +441,11 @@ async def capabilities_tool(args: dict[str, Any]) -> dict[str, Any]:
       "Start (or resume) background production of a run that already has script.json. "
       "mode: 'full' (default), 'videos' (keep images, redo clips onward), or 'clips' "
       "(selected repair clips only). Existing clips are skipped, so mode 'videos' "
-      "requires force_video=true to actually redo clips. Poll production_status "
-      "for progress.",
-      _schema({"run_id": _STR, "mode": _STR, "force_video": _BOOL, "segment_ids": _STR},
+      "requires force_video=true to actually redo clips. preset_id: apply a saved "
+      "style preset's voice/quality/video-provider settings to this production (snapshot "
+      "persists across resumes of the same run). Poll production_status for progress.",
+      _schema({"run_id": _STR, "mode": _STR, "force_video": _BOOL, "segment_ids": _STR,
+               "preset_id": _STR},
               ["run_id"]))
 async def produce_run_tool(args: dict[str, Any]) -> dict[str, Any]:
     from src.studio import producer
@@ -454,6 +456,7 @@ async def produce_run_tool(args: dict[str, Any]) -> dict[str, Any]:
             mode=args.get("mode") or "full",
             force_video=bool(args.get("force_video")),
             segment_ids=args.get("segment_ids") or "",
+            preset_id=args.get("preset_id") or "",
         )
     except FileNotFoundError:
         return _err(f"run not found (or missing script.json): {args.get('run_id')}")

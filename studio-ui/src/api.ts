@@ -302,6 +302,7 @@ export interface StartRunProductionOptions {
   force_video?: boolean
   segment_ids?: string
   speed?: number
+  preset_id?: string
 }
 
 export async function startRunProduction(

@@ -17,6 +17,9 @@ interface FlowViewerProps {
   /** The active project — the flow list is scoped to it. */
   currentProjectId: string | null
   onRunIdChange: (runId: string, title?: string) => void
+  /** The currently selected style preset's id, sent along with Produce so
+   * production picks up the preset's voice/quality/video-provider overrides. */
+  activePresetId?: string | null
 }
 
 function inProject(run: RunSummary, projectId: string | null): boolean {
@@ -220,7 +223,7 @@ function qaBadgeText(qa: RunQA): string {
 
 // ── FlowViewer ───────────────────────────────────────────────────────────────
 
-export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChange }: FlowViewerProps) {
+export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChange, activePresetId }: FlowViewerProps) {
   const [runs, setRuns] = useState<RunSummary[]>([])
   const [selectedId, setSelectedId] = useState<string | null>(null)
   const projectRuns = runs.filter((r) => inProject(r, currentProjectId))
@@ -362,6 +365,7 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
       options.force_video = true
     }
     if (speed !== 1) options.speed = speed
+    if (activePresetId) options.preset_id = activePresetId
     startRunProduction(runId, Object.keys(options).length > 0 ? options : undefined)
       .then((production) => {
         setDetail((current) => (

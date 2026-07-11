@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import threading
@@ -94,7 +95,7 @@ def _capture_production_envs(monkeypatch, run_dir) -> list[dict]:
         run_id="run_abc123", thread=threading.Thread(target=lambda: None)
     )
     producer._run_production(
-        "run_abc123", run_dir, {"job": job}, "clips", False, "", None
+        "run_abc123", run_dir, {"job": job}, "clips", False, "", None, None
     )
     return envs
 
@@ -229,3 +230,79 @@ def test_run_command_kills_process_immediately_if_stop_requested_during_spawn(
     assert len(killed) == 1
     proc = killed[0]
     assert _wait_until(lambda: proc.poll() is not None), "spawned process was not killed"
+
+
+# ---------------------------------------------------------------------------
+# preset_id — snapshot, env propagation, resume, unknown preset
+# ---------------------------------------------------------------------------
+
+
+def test_start_run_production_with_preset_writes_snapshot_and_applies_env(run_dir, monkeypatch):
+    fake_preset = {
+        "id": "cinematic_documentary",
+        "builtin": True,
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Eric",
+        "video_provider": "ltx",
+    }
+    monkeypatch.setattr(
+        producer.presets, "get_preset",
+        lambda pid: fake_preset if pid == "cinematic_documentary" else None,
+    )
+    monkeypatch.setattr(producer, "_pipeline_steps", lambda *a, **k: [("noop", "No-op", ["true"])])
+    envs: list[dict] = []
+    monkeypatch.setattr(producer, "_run_command", lambda *, env, **kwargs: envs.append(env))
+
+    status = producer.start_run_production("run_abc123", preset_id="cinematic_documentary")
+    assert status["status"] == "running"
+    assert _wait_until(lambda: producer.get_run_production_status("run_abc123")["status"] != "running")
+
+    snapshot = run_dir / producer.PRESET_SNAPSHOT_FILE
+    assert snapshot.exists()
+    assert json.loads(snapshot.read_text())["id"] == "cinematic_documentary"
+
+    assert len(envs) == 1
+    assert envs[0]["PTV_VOICE_PROVIDER"] == "voicebox"
+    assert envs[0]["PTV_VOICEBOX_PROFILE"] == "Eric"
+    assert envs[0]["PTV_VIDEO_PROVIDER"] == "ltx"
+
+
+def test_start_run_production_reuses_snapshot_without_preset_id(run_dir, monkeypatch):
+    fake_preset = {"id": "cinematic_documentary", "builtin": True, "tts_provider": "voicebox"}
+    monkeypatch.setattr(
+        producer.presets, "get_preset",
+        lambda pid: fake_preset if pid == "cinematic_documentary" else None,
+    )
+    monkeypatch.setattr(producer, "_pipeline_steps", lambda *a, **k: [("noop", "No-op", ["true"])])
+    envs: list[dict] = []
+    monkeypatch.setattr(producer, "_run_command", lambda *, env, **kwargs: envs.append(env))
+
+    producer.start_run_production("run_abc123", preset_id="cinematic_documentary")
+    assert _wait_until(lambda: producer.get_run_production_status("run_abc123")["status"] != "running")
+    assert len(envs) == 1 and envs[0]["PTV_VOICE_PROVIDER"] == "voicebox"
+
+    # A later call with no preset_id reuses the snapshot from the first call.
+    producer.start_run_production("run_abc123")
+    assert _wait_until(lambda: len(envs) == 2)
+    assert envs[1]["PTV_VOICE_PROVIDER"] == "voicebox"
+
+
+def test_start_run_production_unknown_preset_id_raises_value_error(run_dir, monkeypatch):
+    monkeypatch.setattr(producer.presets, "get_preset", lambda pid: None)
+    with pytest.raises(ValueError, match="unknown preset"):
+        producer.start_run_production("run_abc123", preset_id="does_not_exist")
+    assert not (run_dir / producer.PRESET_SNAPSHOT_FILE).exists()
+
+
+def test_start_run_production_no_preset_no_snapshot_is_unchanged(run_dir, monkeypatch):
+    """No preset_id and no prior snapshot = today's behavior exactly: no
+    preset env at all, no snapshot file written."""
+    monkeypatch.delenv("PTV_VOICE_PROVIDER", raising=False)
+    monkeypatch.setattr(producer, "_pipeline_steps", lambda *a, **k: [("noop", "No-op", ["true"])])
+    envs: list[dict] = []
+    monkeypatch.setattr(producer, "_run_command", lambda *, env, **kwargs: envs.append(env))
+
+    producer.start_run_production("run_abc123")
+    assert _wait_until(lambda: producer.get_run_production_status("run_abc123")["status"] != "running")
+    assert not (run_dir / producer.PRESET_SNAPSHOT_FILE).exists()
+    assert envs and "PTV_VOICE_PROVIDER" not in envs[0]
