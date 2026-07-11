@@ -1,31 +1,15 @@
 import { useCallback, useEffect, useState } from 'react'
+import { fetchPresets, fetchStylePackDetail, fetchVoiceboxProfiles } from '../api'
+import type { Preset, StylePackDetail, VoiceboxProfile } from '../api'
+import { TTS_LANGUAGES, TTS_SPEAKERS } from '../constants'
+import { Modal } from './Modal'
 import '../styles/preset-project-bar.css'
-
-interface Preset {
-  id: string
-  name: string
-  description: string
-  builtin: boolean
-  style_prompt: string
-  video_length_minutes: number
-  voice_speaker: string
-  voice_language: string
-  video_provider: string
-  narration_style: string
-  style_pack?: string | null
-  default_visual_engine?: string | null
-  sfx_style?: string | null
-  tts_provider?: string | null
-  voicebox_profile?: string | null
-}
 
 interface StylePack {
   id: string
   name: string
 }
 
-const SPEAKERS = ['serena', 'vivian', 'aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'sohee', 'uncle_fu']
-const LANGUAGES = ['auto', 'english', 'chinese', 'japanese', 'korean', 'german', 'french', 'russian', 'portuguese', 'spanish', 'italian']
 const LENGTHS = [0.5, 1, 2, 3, 5, 10]
 
 function formatName(value: string): string {
@@ -55,9 +39,14 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
   const [presets, setPresets] = useState<Preset[]>([])
   const [activePreset, setActivePreset] = useState<Preset | null>(null)
   const [stylePacks, setStylePacks] = useState<StylePack[]>([])
-  const [expanded, setExpanded] = useState(false)
+  const [showCustomize, setShowCustomize] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveName, setSaveName] = useState('')
+  const [packDetail, setPackDetail] = useState<StylePackDetail | null>(null)
+  const [packDetailError, setPackDetailError] = useState<string | null>(null)
+  const [packDetailLoading, setPackDetailLoading] = useState(false)
+  const [voiceboxProfiles, setVoiceboxProfiles] = useState<VoiceboxProfile[]>([])
+  const [voiceboxAvailable, setVoiceboxAvailable] = useState(false)
 
   useEffect(() => {
     fetch('/api/style_packs')
@@ -66,11 +55,43 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
       .catch(() => setStylePacks([]))
   }, [])
 
+  // Refreshed each time the modal opens (not just once) so a profile created
+  // in the Voicebox app while this page was already open still shows up.
   useEffect(() => {
-    fetch('/api/presets')
-      .then(r => r.json())
-      .then(data => {
-        const nextPresets = dedupePresets(data.presets || [])
+    if (!showCustomize) return
+    fetchVoiceboxProfiles()
+      .then(res => {
+        setVoiceboxProfiles(res.profiles)
+        setVoiceboxAvailable(res.available)
+      })
+      .catch(() => { setVoiceboxProfiles([]); setVoiceboxAvailable(false) })
+  }, [showCustomize])
+
+  // Fetch the full style-pack detail (palette/type/motion/texture/flux
+  // prompt) whenever the modal is open and the selected pack changes — the
+  // preset object itself only carries the pack's id, not what it looks like.
+  useEffect(() => {
+    if (!showCustomize) return
+    const packId = activePreset?.style_pack
+    if (!packId) {
+      setPackDetail(null)
+      setPackDetailError(null)
+      return
+    }
+    let cancelled = false
+    setPackDetailLoading(true)
+    setPackDetailError(null)
+    fetchStylePackDetail(packId)
+      .then(detail => { if (!cancelled) setPackDetail(detail) })
+      .catch(() => { if (!cancelled) setPackDetailError(`Couldn't load "${packId}" style pack detail.`) })
+      .finally(() => { if (!cancelled) setPackDetailLoading(false) })
+    return () => { cancelled = true }
+  }, [showCustomize, activePreset?.style_pack])
+
+  useEffect(() => {
+    fetchPresets()
+      .then(list => {
+        const nextPresets = dedupePresets(list)
         setPresets(nextPresets)
         if (!activePreset && nextPresets.length) {
           setActivePreset(nextPresets[0])
@@ -90,10 +111,23 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
     if (p) setActivePreset(p)
   }, [presets])
 
-  const updateField = useCallback((field: string, value: string | number) => {
+  const updateField = useCallback((field: string, value: string | number | boolean | null) => {
     if (!activePreset) return
     setActivePreset({ ...activePreset, [field]: value })
   }, [activePreset])
+
+  // Generation-quality overrides are all optional (undefined/null = "use the
+  // pipeline's own default"). These helpers turn an empty select/input back
+  // into null instead of an empty string, so "Auto" really means unset.
+  const updateOptionalString = useCallback((field: string, raw: string) => {
+    updateField(field, raw === '' ? null : raw)
+  }, [updateField])
+  const updateOptionalNumber = useCallback((field: string, raw: string) => {
+    updateField(field, raw === '' ? null : Number(raw))
+  }, [updateField])
+  const updateOptionalBoolean = useCallback((field: string, raw: string) => {
+    updateField(field, raw === '' ? null : raw === 'true')
+  }, [updateField])
 
   const handleSave = useCallback(async () => {
     if (!activePreset || !saveName.trim()) return
@@ -104,9 +138,7 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body),
     })
-    const r = await fetch('/api/presets')
-    const data = await r.json()
-    const nextPresets = dedupePresets(data.presets || [])
+    const nextPresets = dedupePresets(await fetchPresets())
     setPresets(nextPresets)
     setSaving(false)
     setSaveName('')
@@ -122,13 +154,12 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
 
   return (
     <div className="preset-bar">
-      <div className="preset-bar-header" onClick={() => setExpanded(!expanded)}>
+      <div className="preset-bar-header">
         <span className="bar-label">Style preset</span>
         <select
           className="bar-select"
           value={activePreset.id}
           onChange={e => selectPreset(e.target.value)}
-          onClick={e => e.stopPropagation()}
           aria-label="Style preset"
         >
           {presets.map(p => (
@@ -139,20 +170,44 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
           <span className="preset-bar-meta">
             {formatName(activePreset.voice_speaker)} · {formatName(activePreset.voice_language)} · {formatLength(activePreset.video_length_minutes)}
           </span>
-          <button type="button" className="btn btn-ghost btn-sm" aria-expanded={expanded}>
+          <button type="button" className="btn btn-ghost btn-sm" onClick={() => setShowCustomize(true)}>
             Customize
-            <svg
-              className={`preset-chevron${expanded ? ' open' : ''}`}
-              width="10" height="6" viewBox="0 0 10 6" aria-hidden="true"
-            >
-              <path d="M1 1l4 4 4-4" stroke="currentColor" strokeWidth="1.5" fill="none" strokeLinecap="round" />
-            </svg>
           </button>
         </div>
       </div>
 
-      {expanded && (
-        <div className="preset-settings">
+      {showCustomize && (
+        <Modal
+          title={`Customize · ${activePreset.name}`}
+          onClose={() => setShowCustomize(false)}
+          footer={
+            saving ? (
+              <div className="preset-save-row">
+                <input
+                  className="input preset-save-input"
+                  value={saveName}
+                  onChange={e => setSaveName(e.target.value)}
+                  placeholder="Name this preset…"
+                  autoFocus
+                  onKeyDown={e => e.key === 'Enter' && handleSave()}
+                />
+                <button className="btn btn-primary" onClick={handleSave}>Save</button>
+                <button className="btn btn-ghost" onClick={() => setSaving(false)}>Cancel</button>
+              </div>
+            ) : (
+              <>
+                <button className="btn btn-secondary" onClick={() => { setSaving(true); setSaveName(activePreset.name) }}>
+                  Save as new preset
+                </button>
+                {!activePreset.builtin && (
+                  <button className="btn btn-danger" onClick={() => handleDelete(activePreset.id)}>
+                    Delete preset
+                  </button>
+                )}
+              </>
+            )
+          }
+        >
           <div className="preset-settings-prompts">
             <div className="field">
               <label className="field-label">Visual style</label>
@@ -183,7 +238,7 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
                 value={activePreset.voice_speaker}
                 onChange={e => updateField('voice_speaker', e.target.value)}
               >
-                {SPEAKERS.map(s => <option key={s} value={s}>{formatName(s)}</option>)}
+                {TTS_SPEAKERS.map(s => <option key={s} value={s}>{formatName(s)}</option>)}
               </select>
             </div>
             <div className="field">
@@ -193,7 +248,7 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
                 value={activePreset.voice_language}
                 onChange={e => updateField('voice_language', e.target.value)}
               >
-                {LANGUAGES.map(l => <option key={l} value={l}>{formatName(l)}</option>)}
+                {TTS_LANGUAGES.map(l => <option key={l} value={l}>{formatName(l)}</option>)}
               </select>
             </div>
             <div className="field">
@@ -245,7 +300,7 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
               <label className="field-label">Voice provider</label>
               <select
                 className="select"
-                value={activePreset.tts_provider || 'qwen'}
+                value={activePreset.tts_provider || 'voicebox'}
                 onChange={e => updateField('tts_provider', e.target.value)}
               >
                 <option value="qwen">Qwen3-TTS (local)</option>
@@ -256,43 +311,261 @@ export function PresetBar({ onPresetChange }: { onPresetChange?: (preset: Preset
             {activePreset.tts_provider === 'voicebox' && (
               <div className="field">
                 <label className="field-label">Voicebox profile</label>
+                {voiceboxAvailable && voiceboxProfiles.length > 0 ? (
+                  <select
+                    className="select"
+                    value={activePreset.voicebox_profile || ''}
+                    onChange={e => updateField('voicebox_profile', e.target.value)}
+                  >
+                    <option value="">Choose a profile…</option>
+                    {voiceboxProfiles.map(p => (
+                      <option key={p.id} value={p.name}>
+                        {p.name}{p.default_engine ? ` (${formatName(p.default_engine)})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <>
+                    <input
+                      className="input"
+                      value={activePreset.voicebox_profile || ''}
+                      onChange={e => updateField('voicebox_profile', e.target.value)}
+                      placeholder="Narrator"
+                    />
+                    <p className="advanced-settings-hint">
+                      {voiceboxAvailable
+                        ? 'No profiles found — create one in the Voicebox app first.'
+                        : "Voicebox app isn't running — launch it to pick from your real profiles instead of typing a name."}
+                    </p>
+                  </>
+                )}
+              </div>
+            )}
+            {activePreset.tts_provider === 'qwen' && (
+              <div className="field">
+                <label className="field-label">Qwen model size</label>
+                <select
+                  className="select"
+                  value={activePreset.qwen_model_size ?? ''}
+                  onChange={e => updateOptionalString('qwen_model_size', e.target.value)}
+                >
+                  <option value="">Auto (0.6B)</option>
+                  <option value="0.6B">0.6B (fast)</option>
+                  <option value="1.7B">1.7B (higher quality)</option>
+                </select>
+              </div>
+            )}
+          </div>
+
+          <div className="advanced-settings">
+            <span className="section-title">Image generation</span>
+            <p className="advanced-settings-hint">Leave on Auto to use the pipeline's own defaults.</p>
+            <div className="preset-settings-grid">
+              <div className="field">
+                <label className="field-label">Image model</label>
+                <select
+                  className="select"
+                  value={activePreset.image_model ?? ''}
+                  onChange={e => updateOptionalString('image_model', e.target.value)}
+                >
+                  <option value="">Auto (Z-Image Turbo)</option>
+                  <option value="z-image-turbo">Z-Image Turbo</option>
+                  <option value="schnell">FLUX Schnell (faster, lower quality)</option>
+                </select>
+              </div>
+              <div className="field">
+                <label className="field-label">Steps</label>
                 <input
                   className="input"
-                  value={activePreset.voicebox_profile || ''}
-                  onChange={e => updateField('voicebox_profile', e.target.value)}
-                  placeholder="Narrator"
+                  type="number"
+                  min={1}
+                  value={activePreset.image_steps ?? ''}
+                  onChange={e => updateOptionalNumber('image_steps', e.target.value)}
+                  placeholder="Auto (8)"
                 />
               </div>
-            )}
+              <div className="field">
+                <label className="field-label">Quantize</label>
+                <select
+                  className="select"
+                  value={activePreset.image_quantize ?? ''}
+                  onChange={e => updateOptionalNumber('image_quantize', e.target.value)}
+                >
+                  <option value="">Auto (4)</option>
+                  <option value={4}>4 (lower memory)</option>
+                  <option value={8}>8 (higher fidelity)</option>
+                </select>
+              </div>
+            </div>
           </div>
-          <div className="preset-settings-footer">
-            {saving ? (
-              <div className="preset-save-row">
+
+          <div className="advanced-settings">
+            <span className="section-title">Video motion (LTX)</span>
+            <p className="advanced-settings-hint">Only applies when Motion above is set to LTX-2.3 action.</p>
+            <div className="preset-settings-grid">
+              <div className="field">
+                <label className="field-label">LTX steps</label>
                 <input
-                  className="input preset-save-input"
-                  value={saveName}
-                  onChange={e => setSaveName(e.target.value)}
-                  placeholder="Name this preset…"
-                  autoFocus
-                  onKeyDown={e => e.key === 'Enter' && handleSave()}
+                  className="input"
+                  type="number"
+                  min={1}
+                  value={activePreset.ltx_steps ?? ''}
+                  onChange={e => updateOptionalNumber('ltx_steps', e.target.value)}
+                  placeholder="Auto (30)"
                 />
-                <button className="btn btn-primary" onClick={handleSave}>Save</button>
-                <button className="btn btn-ghost" onClick={() => setSaving(false)}>Cancel</button>
               </div>
-            ) : (
-              <>
-                <button className="btn btn-secondary" onClick={() => { setSaving(true); setSaveName(activePreset.name) }}>
-                  Save as new preset
-                </button>
-                {!activePreset.builtin && (
-                  <button className="btn btn-danger" onClick={() => handleDelete(activePreset.id)}>
-                    Delete preset
-                  </button>
+              <div className="field">
+                <label className="field-label">Resolution</label>
+                <input
+                  className="input"
+                  value={activePreset.ltx_resolution ?? ''}
+                  onChange={e => updateOptionalString('ltx_resolution', e.target.value)}
+                  placeholder="Auto (704x448)"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">Clip length (s)</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={0.5}
+                  step={0.5}
+                  value={activePreset.ltx_clip_seconds ?? ''}
+                  onChange={e => updateOptionalNumber('ltx_clip_seconds', e.target.value)}
+                  placeholder="Auto (3.0)"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">CFG scale</label>
+                <input
+                  className="input"
+                  type="number"
+                  step={0.1}
+                  value={activePreset.ltx_cfg_scale ?? ''}
+                  onChange={e => updateOptionalNumber('ltx_cfg_scale', e.target.value)}
+                  placeholder="Auto (3.0)"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">STG scale</label>
+                <input
+                  className="input"
+                  type="number"
+                  step={0.1}
+                  value={activePreset.ltx_stg_scale ?? ''}
+                  onChange={e => updateOptionalNumber('ltx_stg_scale', e.target.value)}
+                  placeholder="Auto (1.0)"
+                />
+              </div>
+              <div className="field">
+                <label className="field-label">Prefer extend</label>
+                <select
+                  className="select"
+                  value={activePreset.ltx_prefer_extend === null || activePreset.ltx_prefer_extend === undefined ? '' : String(activePreset.ltx_prefer_extend)}
+                  onChange={e => updateOptionalBoolean('ltx_prefer_extend', e.target.value)}
+                >
+                  <option value="">Auto (off)</option>
+                  <option value="true">On</option>
+                  <option value="false">Off</option>
+                </select>
+              </div>
+              <div className="field">
+                <label className="field-label">Ken Burns fallback</label>
+                <select
+                  className="select"
+                  value={activePreset.video_fallback_to_kenburns === null || activePreset.video_fallback_to_kenburns === undefined ? '' : String(activePreset.video_fallback_to_kenburns)}
+                  onChange={e => updateOptionalBoolean('video_fallback_to_kenburns', e.target.value)}
+                >
+                  <option value="">Auto (on)</option>
+                  <option value="true">On — use Ken Burns if LTX fails</option>
+                  <option value="false">Off — fail instead of falling back</option>
+                </select>
+              </div>
+              <div className="field">
+                <label className="field-label">Ken Burns zoom</label>
+                <input
+                  className="input"
+                  type="number"
+                  min={1}
+                  step={0.01}
+                  value={activePreset.kenburns_zoom ?? ''}
+                  onChange={e => updateOptionalNumber('kenburns_zoom', e.target.value)}
+                  placeholder="Auto (1.12)"
+                />
+              </div>
+            </div>
+          </div>
+
+          <div className="style-pack-detail">
+            <span className="section-title">Style pack detail</span>
+            {!activePreset.style_pack && (
+              <p className="style-pack-empty">No style pack selected — images use only the visual style prompt above.</p>
+            )}
+            {activePreset.style_pack && packDetailLoading && (
+              <div className="skeleton style-pack-skeleton" aria-hidden="true" />
+            )}
+            {activePreset.style_pack && packDetailError && (
+              <p className="style-pack-empty error-state">{packDetailError}</p>
+            )}
+            {packDetail && !packDetailLoading && (
+              <div className="style-pack-grid">
+                <div className="style-pack-row">
+                  <span className="field-label">Palette</span>
+                  <div className="palette-swatches">
+                    {Object.entries(packDetail.palette).map(([role, hex]) => (
+                      <div className="palette-swatch" key={role} title={`${role}: ${hex}`}>
+                        <span className="palette-swatch-color" style={{ background: hex }} />
+                        <span className="palette-swatch-label">{role}</span>
+                        <span className="palette-swatch-hex">{hex}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+                <div className="style-pack-row">
+                  <span className="field-label">Typography</span>
+                  <div className="style-pack-kv">
+                    {Object.entries(packDetail.type).map(([role, font]) => (
+                      <span key={role}><b>{role}</b> {font}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="style-pack-row">
+                  <span className="field-label">Motion</span>
+                  <div className="style-pack-kv">
+                    {Object.entries(packDetail.motion).map(([key, value]) => (
+                      <span key={key}><b>{formatName(key)}</b> {String(value)}</span>
+                    ))}
+                  </div>
+                </div>
+                <div className="style-pack-row">
+                  <span className="field-label">Texture</span>
+                  <div className="style-pack-kv">
+                    {Object.entries(packDetail.texture).map(([key, value]) => (
+                      <span key={key}><b>{formatName(key)}</b> {String(value)}</span>
+                    ))}
+                  </div>
+                </div>
+                {(packDetail.flux_prefix || packDetail.flux_suffix) && (
+                  <div className="style-pack-row style-pack-row-wide">
+                    <span className="field-label">Image style (FLUX)</span>
+                    <p className="style-pack-flux">
+                      {packDetail.flux_prefix}
+                      {packDetail.flux_suffix && <><br />{packDetail.flux_suffix}</>}
+                    </p>
+                  </div>
                 )}
-              </>
+                {packDetail.fonts.length > 0 && (
+                  <div className="style-pack-row">
+                    <span className="field-label">Bundled fonts</span>
+                    <div className="style-pack-kv">
+                      {packDetail.fonts.map(f => <span key={f}>{f}</span>)}
+                    </div>
+                  </div>
+                )}
+              </div>
             )}
           </div>
-        </div>
+        </Modal>
       )}
     </div>
   )

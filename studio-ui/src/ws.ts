@@ -1,3 +1,5 @@
+import type { Preset } from './api'
+
 // ─── WebSocket Message Types ─────────────────────────────────────────────────
 
 export interface WsSessionMsg {
@@ -52,6 +54,12 @@ export interface WsErrorMsg {
   conversation_id?: string
 }
 
+/** Server confirmation that a turn detached by a dropped socket was reclaimed. */
+export interface WsResumedMsg {
+  type: 'resumed'
+  conversation_id?: string
+}
+
 export type WsInboundMessage =
   | WsSessionMsg
   | WsAssistantTextMsg
@@ -60,10 +68,17 @@ export type WsInboundMessage =
   | WsArtifactUpdatedMsg
   | WsDoneMsg
   | WsErrorMsg
+  | WsResumedMsg
 
 export interface WsStopMsg {
   type: 'stop'
   conversation_id?: string
+}
+
+/** Ask the server to reclaim a turn that kept running after a disconnect. */
+export interface WsResumeMsg {
+  type: 'resume'
+  conversation_id: string
 }
 
 export interface WsUserMessage {
@@ -73,23 +88,10 @@ export interface WsUserMessage {
   conversation_id?: string
   session_id?: string | null
   project_id?: string | null
-  preset?: {
-    name: string
-    style_prompt: string
-    narration_style: string
-    video_length_minutes: number
-    voice_speaker: string
-    voice_language: string
-    video_provider: string
-    style_pack?: string | null
-    default_visual_engine?: string | null
-    sfx_style?: string | null
-    tts_provider?: string | null
-    voicebox_profile?: string | null
-  } | null
+  preset?: Preset | null
 }
 
-export type WsOutboundMessage = WsUserMessage | WsStopMsg
+export type WsOutboundMessage = WsUserMessage | WsStopMsg | WsResumeMsg
 
 // ─── ChatWebSocket class ──────────────────────────────────────────────────────
 

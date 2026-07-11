@@ -214,7 +214,24 @@ def split_beat_durations(total_seconds: float, beats: list[SegmentVisualBeat]) -
     allocated_total = sum(allocated)
     if allocated_total > 0 and abs(allocated_total - total) > 1e-9:
         allocated = [value * (total / allocated_total) for value in allocated]
-    return [max(0.1, value) for value in allocated]
+    allocated = [max(0.1, value) for value in allocated]
+
+    # Flooring above can push the sum back over `total` when total is small
+    # relative to the beat count. Recover as much of that overshoot as
+    # possible by shrinking whichever beats aren't already pinned to the
+    # floor, proportionally, iterating until stable.
+    for _ in range(len(allocated)):
+        excess = sum(allocated) - total
+        if excess <= 1e-9:
+            break
+        reducible = [i for i, value in enumerate(allocated) if value > 0.1 + 1e-9]
+        if not reducible:
+            break  # every beat is already at the floor; total is too small to honor exactly
+        reducible_total = sum(allocated[i] for i in reducible)
+        for i in reducible:
+            share = excess * (allocated[i] / reducible_total)
+            allocated[i] = max(0.1, allocated[i] - share)
+    return allocated
 
 
 def ltx_motion_prompt(beat: SegmentVisualBeat) -> str:

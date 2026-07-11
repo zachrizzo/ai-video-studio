@@ -25,10 +25,14 @@ from starlette.staticfiles import StaticFiles
 
 from src.studio import config
 from src.studio.runs import _runs_root, get_run, list_runs
-from src.studio.producer import get_run_production_status, start_run_production
+from src.studio.producer import (
+    _pipeline_steps,
+    get_run_production_status,
+    start_run_production,
+)
 from src.studio.agent import handle_ws
 from src.studio.presets import list_presets, get_preset, save_preset, delete_preset
-from src.studio.style_packs import list_style_packs
+from src.studio.style_packs import list_style_packs, load_style_pack
 from src.studio.generate import (
     get_generation, list_generations,
     start_image_generation, start_video_generation,
@@ -197,6 +201,19 @@ class PresetSaveRequest(BaseModel):
     sfx_style: str | None = None
     tts_provider: str | None = None
     voicebox_profile: str | None = None
+    # Generation-quality overrides (undefined = use the pipeline's own default).
+    image_model: str | None = None
+    image_steps: int | None = None
+    image_quantize: int | None = None
+    ltx_steps: int | None = None
+    ltx_resolution: str | None = None
+    ltx_clip_seconds: float | None = None
+    ltx_cfg_scale: float | None = None
+    ltx_stg_scale: float | None = None
+    ltx_prefer_extend: bool | None = None
+    video_fallback_to_kenburns: bool | None = None
+    kenburns_zoom: float | None = None
+    qwen_model_size: str | None = None
 
 class TTSRequest(BaseModel):
     text: str
@@ -381,6 +398,27 @@ async def api_start_run_production(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.get("/api/pipeline-steps")
+async def api_pipeline_steps() -> dict:
+    """Ordered production step ids/labels per mode, straight from the producer.
+
+    The UI stepper derives its display from this instead of hardcoding a copy
+    of producer._pipeline_steps.
+    """
+    # _pipeline_steps only builds command args from run_dir (no filesystem
+    # access), so a placeholder path is fine for listing ids/labels.
+    placeholder = Path(".")
+    return {
+        "modes": {
+            mode: [
+                {"id": step, "label": label}
+                for step, label, _ in _pipeline_steps(placeholder, mode)
+            ]
+            for mode in ("full", "videos", "clips")
+        }
+    }
+
+
 # ---------------------------------------------------------------------------
 # File upload endpoint
 # ---------------------------------------------------------------------------
@@ -397,14 +435,16 @@ async def api_upload(file: UploadFile) -> dict:
     file_id = uuid.uuid4().hex[:16]
     dest = _UPLOADS_DIR / f"{file_id}{ext}"
     size = 0
-    with dest.open("wb") as out:
-        while chunk := await file.read(1024 * 1024):
-            size += len(chunk)
-            if size > MAX_UPLOAD_SIZE:
-                out.close()
-                dest.unlink(missing_ok=True)
-                raise HTTPException(status_code=413, detail="File too large")
-            out.write(chunk)
+    try:
+        with dest.open("wb") as out:
+            while chunk := await file.read(1024 * 1024):
+                size += len(chunk)
+                if size > MAX_UPLOAD_SIZE:
+                    raise HTTPException(status_code=413, detail="File too large")
+                out.write(chunk)
+    except Exception:
+        dest.unlink(missing_ok=True)
+        raise
     return {"path": str(dest), "url": f"/uploads/{file_id}{ext}"}
 
 
@@ -572,6 +612,65 @@ async def api_delete_preset(preset_id: str) -> dict:
 @app.get("/api/style_packs")
 async def api_list_style_packs() -> dict:
     return {"style_packs": list_style_packs()}
+
+
+@app.get("/api/style_packs/{name}")
+async def api_get_style_pack(name: str) -> dict:
+    """Full detail for one style pack — the tokens (palette/type/motion/
+    texture) and FLUX prompt prefix/suffix that /api/style_packs' summary
+    (palette only) leaves out, so the preset UI can show what a style pack
+    actually is instead of just its name."""
+    try:
+        pack = load_style_pack(name)
+    except FileNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    return {
+        "id": pack.name,
+        "name": pack.tokens.get("name", pack.name),
+        "description": pack.tokens.get("description", ""),
+        "palette": pack.tokens.get("palette", {}),
+        "type": pack.tokens.get("type", {}),
+        "motion": pack.tokens.get("motion", {}),
+        "texture": pack.tokens.get("texture", {}),
+        "flux_prefix": pack.flux_prefix,
+        "flux_suffix": pack.flux_suffix,
+        "fonts": [f.name for f in pack.fonts],
+    }
+
+
+# ---------------------------------------------------------------------------
+# Voicebox profiles
+# ---------------------------------------------------------------------------
+
+
+@app.get("/api/voicebox/profiles")
+async def api_list_voicebox_profiles() -> dict:
+    """List real Voicebox profiles (name/id/default_engine) so the preset UI
+    can offer a real dropdown instead of a free-text field the user has to
+    get exactly right. Voicebox being unreachable is a normal, expected state
+    (the app may not be running) — return an empty list with a message
+    rather than a 500, so the UI can show "type a name" as a graceful
+    fallback instead of an error."""
+    from src.config import PipelineConfig
+    from src.studio.tts_voicebox import list_profiles
+
+    cfg = PipelineConfig()
+    try:
+        profiles = list_profiles(cfg.voicebox_url)
+    except RuntimeError as exc:
+        return {"profiles": [], "available": False, "message": str(exc)}
+    return {
+        "profiles": [
+            {
+                "id": p.get("id"),
+                "name": p.get("name"),
+                "default_engine": p.get("default_engine"),
+            }
+            for p in profiles
+        ],
+        "available": True,
+        "message": None,
+    }
 
 
 # ---------------------------------------------------------------------------

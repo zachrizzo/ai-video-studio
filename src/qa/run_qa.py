@@ -684,6 +684,17 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
         if not audio_entry:
             add(Check("audio.segment_missing", "error", "Missing audio manifest entry.", seg_id))
             continue
+        if audio_entry.get("failed"):
+            add(
+                Check(
+                    "audio.synthesis_failed",
+                    "error",
+                    "Narration synthesis failed for this segment — re-run synthesize before compositing.",
+                    seg_id,
+                    details={"error": str(audio_entry.get("error") or "TTS failed")},
+                )
+            )
+            continue
 
         audio_path = Path(audio_entry.get("audio_path", ""))
         if not audio_path.exists():
@@ -757,6 +768,47 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
     if not final_video.exists():
         add(Check("final.missing", "warning", "No final.mp4 found in run directory.", path=str(final_video)))
     else:
+        # --- A/V sync: final duration must cover the full narration ---
+        # The compositor's AV merge uses ffmpeg -shortest, which silently
+        # truncates when the concatenated clips are shorter than the narration
+        # (e.g. audio was re-rolled but existing clips were skipped). Compare
+        # the composited duration against the audio manifest total, adjusted
+        # for the playback speed cmd_composite applies (config.video_speed).
+        narration_total = sum(
+            float(entry.get("duration_seconds") or 0)
+            for key, entry in audio_manifest.items()
+            if not key.startswith("_") and isinstance(entry, dict) and not entry.get("failed")
+        )
+        final_duration = _ffprobe_duration(final_video)
+        speed = float(config.video_speed or 1.0)
+        if narration_total > 0 and final_duration is not None and speed > 0:
+            expected = narration_total / speed
+            tolerance = max(1.0, expected * 0.015)
+            drift = final_duration - expected
+            if abs(drift) > tolerance:
+                direction = "shorter" if drift < 0 else "longer"
+                add(
+                    Check(
+                        "final.av_sync_drift",
+                        "error",
+                        (
+                            f"Final video is {abs(drift):.1f}s {direction} than the narration "
+                            f"({final_duration:.1f}s vs {expected:.1f}s expected) — video/audio "
+                            "desync; regenerate clips for segments after the drift point "
+                            "(videogen with force) and re-composite."
+                        ),
+                        path=str(final_video),
+                        details={
+                            "final_seconds": final_duration,
+                            "expected_seconds": expected,
+                            "narration_seconds": narration_total,
+                            "video_speed": speed,
+                            "drift_seconds": drift,
+                            "tolerance_seconds": tolerance,
+                        },
+                    )
+                )
+
         final_loudness = _probe_loudness(final_video)
         if final_loudness and "input_i" in final_loudness:
             integrated = final_loudness["input_i"]

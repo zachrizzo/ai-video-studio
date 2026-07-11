@@ -181,6 +181,91 @@ def test_storyboard_command_writes_visual_beat_frames(tmp_path: Path) -> None:
     assert frames[1]["camera_motion"] == "slow pull-out"
 
 
+def test_storyboard_warns_on_implausibly_short_duration_estimate(tmp_path: Path) -> None:
+    """Regression: a segment's estimated_duration_seconds must be plausible for
+    its narration word count. An estimate too short for the text wastes a
+    synthesize+QA cycle discovering the same problem this warning catches for
+    free at the preproduction gate (real incident: a 51-word segment estimated
+    at 15s repeatedly failed synthesize's duration-drift QA check because the
+    actual narration needs ~25-30s to speak)."""
+    run_dir = tmp_path / "run_test"
+    run_dir.mkdir()
+    script = {
+        "title": "Duration Estimate Test",
+        "subject": "Subject",
+        "canonical_name": "Subject",
+        "style_bible": "Minimal clean test style.",
+        "storyboard_summary": "One segment with a bad duration estimate.",
+        "release_acceptance_criteria": ["Narration matches script."],
+        "total_estimated_duration_seconds": 15.0,
+        "segments": [
+            {
+                "segment_id": "seg_001",
+                "section_title": "Intro",
+                # 51 words — at ~2.2 words/sec this needs ~23s, not 15s.
+                "narration_text": (
+                    "In 1769, on a small island in the Mediterranean, a boy is born who "
+                    "will conquer a continent. Within thirty years he will crown himself "
+                    "Emperor of the French. This is the story of Napoleon Bonaparte, told "
+                    "through the battles that made him a legend, and the ones that "
+                    "destroyed him."
+                ),
+                "estimated_duration_seconds": 15.0,
+                "animation_cues": [],
+                "visual_engine": "html",
+                "visual_type": "diagram",
+            }
+        ],
+    }
+    (run_dir / "script.json").write_text(json.dumps(script))
+
+    cmd_storyboard(str(run_dir / "script.json"), str(run_dir))
+
+    storyboard = json.loads((run_dir / "storyboard.json").read_text())
+    assert len(storyboard["warnings"]) == 1
+    warning = storyboard["warnings"][0]
+    assert warning["segment_id"] == "seg_001"
+    assert "too short" in warning["warning"]
+    assert "51 words" in warning["warning"]
+
+
+def test_storyboard_no_warning_for_plausible_duration_estimate(tmp_path: Path) -> None:
+    run_dir = tmp_path / "run_test"
+    run_dir.mkdir()
+    script = {
+        "title": "Duration Estimate Test",
+        "subject": "Subject",
+        "canonical_name": "Subject",
+        "style_bible": "Minimal clean test style.",
+        "storyboard_summary": "One segment with a reasonable duration estimate.",
+        "release_acceptance_criteria": ["Narration matches script."],
+        "total_estimated_duration_seconds": 25.0,
+        "segments": [
+            {
+                "segment_id": "seg_001",
+                "section_title": "Intro",
+                "narration_text": (
+                    "In 1769, on a small island in the Mediterranean, a boy is born who "
+                    "will conquer a continent. Within thirty years he will crown himself "
+                    "Emperor of the French. This is the story of Napoleon Bonaparte, told "
+                    "through the battles that made him a legend, and the ones that "
+                    "destroyed him."
+                ),
+                "estimated_duration_seconds": 25.0,
+                "animation_cues": [],
+                "visual_engine": "html",
+                "visual_type": "diagram",
+            }
+        ],
+    }
+    (run_dir / "script.json").write_text(json.dumps(script))
+
+    cmd_storyboard(str(run_dir / "script.json"), str(run_dir))
+
+    storyboard = json.loads((run_dir / "storyboard.json").read_text())
+    assert storyboard["warnings"] == []
+
+
 def test_ltx_motion_prompt_uses_storyboard_action() -> None:
     segment = {
         "segment_id": "seg_001",

@@ -56,6 +56,11 @@ def presets_file() -> Path:
     return target
 
 
+DEFAULT_AGENT_MODEL = "claude-sonnet-5"
+
+
 def agent_model() -> str | None:
-    """Model override for the chat agent (STUDIO_AGENT_MODEL), or None."""
-    return os.environ.get("STUDIO_AGENT_MODEL", "").strip() or None
+    """Model for the chat agent. STUDIO_AGENT_MODEL overrides; otherwise pinned
+    to DEFAULT_AGENT_MODEL so production quality doesn't drift with whatever a
+    given machine's `claude` CLI happens to default to."""
+    return os.environ.get("STUDIO_AGENT_MODEL", "").strip() or DEFAULT_AGENT_MODEL

@@ -6,18 +6,30 @@ Voice + engine selection (Qwen3-TTS, Chatterbox Turbo/Multilingual, Kokoro,
 LuxTTS, TADA, ...) lives on a *profile* created in the Voicebox UI; this
 client only references profiles by name or id.
 
-API surface used (committed spec: repo docs/openapi.json — NOTE it may lag the
-live app; the live spec is served at {url}/docs while running. The committed
-spec still shows Qwen-era request constraints like language ``^(en|zh)$``;
-send only fields we need and parse responses tolerantly):
+API surface used (verified against the LIVE app's /openapi.json 2026-07-09 —
+the committed docs/openapi.json lags badly, e.g. it claimed /generate is
+synchronous; it is not):
 
     GET  /health                     -> 200 when up
-    GET  /profiles                   -> list of {id, name, ...}
-    POST /generate                   -> {"profile_id", "text" (1..5000),
-                                         "language", "seed"?}
-                                      -> {id, audio_path, duration, ...}
-                                         (synchronous)
-    GET  /audio/{generation_id}      -> the audio bytes
+    GET  /profiles                   -> list of {id, name, default_engine, ...}
+    POST /generate                   -> {"profile_id", "text" (1..50000),
+                                         "language", "seed"?, "engine"?}
+                                      -> {id, status: "generating", ...}
+                                         ASYNCHRONOUS — audio isn't ready yet.
+                                         "engine" is NOT derived from the
+                                         profile; omitting it silently
+                                         defaults to "qwen" server-side, so we
+                                         always send the profile's own
+                                         default_engine explicitly.
+    GET  /generate/{id}/status       -> Server-Sent-Events stream of
+                                         {"status": "generating"|"completed"|
+                                         "failed", "duration", "error"} that
+                                         stays open until a terminal status;
+                                         reading it to completion IS the wait.
+    GET  /audio/{generation_id}      -> the audio bytes — returns 500 if the
+                                         generation hasn't reached "completed"
+                                         yet, so /generate/{id}/status must be
+                                         drained first.
 
 NO-FALLBACK RULE (docs/collage/CONTRACTS.md spirit): when the server is
 unreachable or a profile cannot be resolved, functions return/raise hard,
@@ -94,6 +106,31 @@ def _coerce_duration(value: object) -> float | None:
     return seconds if seconds > 0 else None
 
 
+def _parse_sse_last_event(text: str) -> dict | None:
+    """Return the last well-formed `data: {...}` JSON event from an SSE body.
+
+    /generate/{id}/status streams one event per status change and closes the
+    connection once the generation reaches a terminal state — a plain
+    blocking GET that reads the response to completion already waits for
+    exactly that, no manual poll loop needed.
+    """
+    last: dict | None = None
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith("data:"):
+            continue
+        payload = line[len("data:"):].strip()
+        if not payload:
+            continue
+        try:
+            parsed = json.loads(payload)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(parsed, dict):
+            last = parsed
+    return last
+
+
 def _ffprobe_duration(path: Path) -> float | None:
     try:
         proc = subprocess.run(
@@ -162,13 +199,24 @@ def generate_speech_voicebox(
     profile: str,
     language: str = "en",
     seed: int | None = None,
+    engine: str | None = None,
     url: str = DEFAULT_URL,
     timeout: float = 300.0,
 ) -> dict:
     """Generate speech via Voicebox and write a 48 kHz mono wav to output_path.
 
-    POST /generate (synchronous), then GET /audio/{id}; transcode to 48k mono
-    wav with ffmpeg when the returned audio isn't already wav.
+    POST /generate (asynchronous — returns immediately with status
+    "generating"), then drain GET /generate/{id}/status (an SSE stream that
+    closes once the generation reaches "completed"/"failed") before GET
+    /audio/{id}, which 500s on anything not yet "completed". Transcodes to
+    48k mono wav with ffmpeg when the returned audio isn't already wav.
+
+    engine: which Voicebox engine renders the speech (e.g. "kokoro",
+    "chatterbox_turbo", "qwen"). The server does NOT derive this from the
+    profile — omitting it silently defaults to "qwen" — so when the caller
+    doesn't pass one explicitly, this looks up the resolved profile's own
+    default_engine and sends that instead, so a profile actually gets voiced
+    by the engine it was configured with.
 
     Returns {"success": bool, "output_path": str, "error": str | None,
              "duration": float | None} — the same success/error shape as
@@ -184,17 +232,28 @@ def generate_speech_voicebox(
         return {"success": False, "output_path": str(output_path),
                 "error": error, "duration": None}
 
-    # Resolve name/id -> profile_id up front. resolve_profile already raises a
-    # hard error listing available names (bad profile) or the launch hint
-    # (server down); fold either into a success=False result. No fallback.
+    # Resolve name/id -> profile_id up front, and look up its own configured
+    # engine when the caller didn't pin one. resolve_profile/list_profiles
+    # already raise a hard error listing available names (bad profile) or the
+    # launch hint (server down); fold either into a success=False result. No
+    # fallback to a different provider.
+    try:
+        profiles = list_profiles(url)
+    except RuntimeError as exc:
+        return fail(str(exc))
     try:
         profile_id = resolve_profile(url, profile)
     except RuntimeError as exc:
         return fail(str(exc))
+    if engine is None:
+        matched = next((p for p in profiles if str(p.get("id")) == profile_id), None)
+        engine = (matched or {}).get("default_engine") or None
 
     payload: dict = {"profile_id": profile_id, "text": text, "language": language}
     if seed is not None:
         payload["seed"] = seed
+    if engine:
+        payload["engine"] = engine
 
     try:
         gen = _post_json(base + "/generate", payload, timeout)
@@ -204,6 +263,25 @@ def generate_speech_voicebox(
     gen_id = gen.get("id") or gen.get("generation_id")
     if not gen_id:
         return fail(f"Voicebox /generate returned no generation id: {gen!r}")
+
+    # /generate only kicks the job off (status "generating"); drain the
+    # status SSE stream (blocks until the server closes it) to actually wait
+    # for a terminal state before touching /audio/{id}.
+    if gen.get("status") not in ("completed", "done"):
+        try:
+            stream_text = _http_get(f"{base}/generate/{gen_id}/status", timeout).decode(
+                "utf-8", errors="replace"
+            )
+        except _NET_ERRORS as exc:
+            return fail(f"Voicebox generation status stream failed for {gen_id} ({exc}). {_LAUNCH_HINT}")
+        final = _parse_sse_last_event(stream_text)
+        if final is None:
+            return fail(f"Voicebox generation {gen_id} status stream returned nothing usable.")
+        gen = {**gen, **final}
+        if gen.get("status") == "failed":
+            return fail(f"Voicebox generation failed: {gen.get('error') or 'unknown error'}")
+        if gen.get("status") not in ("completed", "done"):
+            return fail(f"Voicebox generation {gen_id} did not complete (status={gen.get('status')!r}).")
 
     try:
         audio_bytes = _http_get(f"{base}/audio/{gen_id}", timeout)

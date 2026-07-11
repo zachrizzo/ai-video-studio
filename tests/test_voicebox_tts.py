@@ -1,9 +1,12 @@
 """Tests for the Voicebox TTS provider (src/studio/tts_voicebox.py).
 
 A threading http.server fake stands in for the Voicebox app: it serves
-/health, /profiles, POST /generate and GET /audio/{id} so the client can be
-exercised end-to-end without the real app running. No third-party HTTP deps —
-the client is stdlib urllib only, and so is this fake.
+/health, /profiles, POST /generate (async — returns "generating"), GET
+/generate/{id}/status (an SSE stream closing on a terminal status), and GET
+/audio/{id}, so the client can be exercised end-to-end without the real app
+running. This mirrors the real app's behavior (verified 2026-07-09), which
+differs from the committed docs/openapi.json in exactly these ways. No
+third-party HTTP deps — the client is stdlib urllib only, and so is this fake.
 """
 
 from __future__ import annotations
@@ -29,9 +32,13 @@ from src.studio.tts_voicebox import (
 )
 
 PROFILES = [
-    {"id": "p1", "name": "Narrator", "engine": "chatterbox-turbo"},
-    {"id": "p2", "name": "Morgan", "engine": "kokoro"},
+    {"id": "p1", "name": "Narrator", "default_engine": "kokoro"},
+    {"id": "p2", "name": "Morgan", "default_engine": "chatterbox_turbo"},
 ]
+
+# Requests captured by the fake POST /generate handler, so tests can assert
+# what the client actually sent (in particular: did it send "engine"?).
+GENERATE_CALLS: list[dict] = []
 
 
 def _ffmpeg(args: list[str]) -> None:
@@ -72,6 +79,20 @@ class _Handler(BaseHTTPRequestHandler):
             self._send_json({"status": "ok"})
         elif self.path == "/profiles":
             self._send_json(PROFILES)
+        elif self.path.startswith("/generate/") and self.path.endswith("/status"):
+            # Real app: SSE stream that closes once a terminal status is
+            # reached. One "generating" event then "completed" is enough to
+            # exercise _parse_sse_last_event without a real multi-second wait.
+            gen_id = self.path.split("/")[2]
+            body = (
+                f'data: {{"id": "{gen_id}", "status": "generating"}}\n\n'
+                f'data: {{"id": "{gen_id}", "status": "completed", "duration": 1.0}}\n\n'
+            ).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         elif self.path.startswith("/audio/"):
             self.send_response(200)
             self.send_header("Content-Type", "audio/wav")
@@ -89,15 +110,27 @@ class _Handler(BaseHTTPRequestHandler):
         except json.JSONDecodeError:
             payload = {}
         if self.path == "/generate":
+            GENERATE_CALLS.append(payload)
+            # Real app: /generate only kicks the job off — status "generating",
+            # no audio yet. The client must drain /generate/{id}/status.
             self._send_json({
                 "id": "gen-abc123",
-                "audio_path": "/tmp/voicebox/gen-abc123.wav",
-                "duration": 1.0,
+                "audio_path": "",
+                "duration": 0.0,
                 "profile_id": payload.get("profile_id"),
                 "seed": payload.get("seed"),
+                "engine": payload.get("engine"),
+                "status": "generating",
             })
         else:
             self._send_json({"error": "not found"}, status=404)
+
+
+@pytest.fixture(autouse=True)
+def _clear_generate_calls():
+    GENERATE_CALLS.clear()
+    yield
+    GENERATE_CALLS.clear()
 
 
 @pytest.fixture
@@ -172,6 +205,84 @@ def test_generate_writes_48k_mono_wav(voicebox_server, tmp_path: Path) -> None:
         assert w.getframerate() == 48000
         assert w.getnchannels() == 1
     assert result["duration"] == pytest.approx(1.0, abs=0.2)
+
+
+def test_generate_derives_engine_from_profile_default(voicebox_server, tmp_path: Path) -> None:
+    """The server does NOT infer engine from profile_id — omitting it silently
+    defaults to "qwen" server-side — so the client must send the profile's
+    own default_engine explicitly (regression for the real-app bug found
+    2026-07-09: Kokoro-configured profiles were silently generated as qwen)."""
+    out = tmp_path / "seg.wav"
+    result = generate_speech_voicebox(
+        text="Hello world", output_path=out, profile="Narrator", url=voicebox_server,
+    )
+    assert result["success"] is True, result["error"]
+    assert len(GENERATE_CALLS) == 1
+    assert GENERATE_CALLS[0]["engine"] == "kokoro"  # p1's default_engine
+
+
+def test_generate_explicit_engine_overrides_profile_default(voicebox_server, tmp_path: Path) -> None:
+    out = tmp_path / "seg.wav"
+    result = generate_speech_voicebox(
+        text="Hello world", output_path=out, profile="Narrator", engine="chatterbox_turbo",
+        url=voicebox_server,
+    )
+    assert result["success"] is True, result["error"]
+    assert GENERATE_CALLS[0]["engine"] == "chatterbox_turbo"
+
+
+def test_generate_waits_for_async_completion(voicebox_server, tmp_path: Path) -> None:
+    """/generate returns "generating" immediately; the client must drain
+    /generate/{id}/status (SSE) before /audio/{id} — this is the regression
+    for the real-app bug where fetching audio immediately 500s."""
+    out = tmp_path / "seg.wav"
+    result = generate_speech_voicebox(
+        text="Hello world", output_path=out, profile="Narrator", url=voicebox_server,
+    )
+    assert result["success"] is True, result["error"]
+    assert result["duration"] == pytest.approx(1.0, abs=0.2)
+
+
+def test_generate_failed_status_is_a_hard_error(tmp_path: Path, monkeypatch) -> None:
+    """A "failed" terminal status from /generate/{id}/status must surface the
+    server's own error message, not silently proceed to /audio/{id}."""
+    class _FailHandler(_Handler):
+        def do_GET(self):  # noqa: N802
+            if self.path == "/health":
+                self._send_json({"status": "ok"})
+            elif self.path == "/profiles":
+                self._send_json(PROFILES)
+            elif self.path.startswith("/generate/") and self.path.endswith("/status"):
+                gen_id = self.path.split("/")[2]
+                body = (
+                    f'data: {{"id": "{gen_id}", "status": "failed", '
+                    f'"error": "No samples found for profile"}}\n\n'
+                ).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "text/event-stream")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            else:
+                self._send_json({"error": "not found"}, status=404)
+
+    server = HTTPServer(("127.0.0.1", 0), _FailHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    host, port = server.server_address
+    try:
+        result = generate_speech_voicebox(
+            text="Hello world", output_path=tmp_path / "seg.wav", profile="Narrator",
+            url=f"http://{host}:{port}",
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=2)
+
+    assert result["success"] is False
+    assert "No samples found for profile" in result["error"]
+    assert not (tmp_path / "seg.wav").exists()
 
 
 def test_generate_server_down_returns_launch_hint(tmp_path: Path) -> None:

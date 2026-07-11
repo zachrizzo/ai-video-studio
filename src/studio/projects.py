@@ -172,6 +172,8 @@ def delete_project(project_id: str) -> bool:
             target_cid = cid
             while target_cid in default_convos:
                 target_cid = f"{project_id}_{target_cid}"
+            if target_cid != cid:
+                convo = {**convo, "id": target_cid}
             default_convos[target_cid] = convo
         del data["projects"][project_id]
         for run_id, pid in list(data["run_assignments"].items()):

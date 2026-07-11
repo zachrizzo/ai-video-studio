@@ -3,6 +3,7 @@ import '../styles/chat-panel.css'
 import { ChatWebSocket } from '../ws'
 import type { WsInboundMessage } from '../ws'
 import { deleteProjectConversation, fetchConversationMessages, upsertProjectConversation } from '../api'
+import type { Preset, ProjectConversation, ServerChatMessage } from '../api'
 
 // ── Local view models ──────────────────────────────────────────────────────────
 
@@ -19,42 +20,41 @@ interface ToolActivity {
   error?: string
 }
 
+/**
+ * Ordered record of what an assistant message actually contains, in the
+ * order it arrived — so tool calls render where they happened instead of
+ * all grouped after the text. Tool parts reference a ToolActivity by id
+ * (resolved from ChatMessage.tools at render time) so tool_result updates
+ * need only touch the tools array, not the ordering.
+ */
+type ChatPart = { kind: 'text'; text: string } | { kind: 'tool'; id: number }
+
 interface ChatMessage {
   id: number
   role: 'user' | 'assistant' | 'error'
   text: string
   tools: ToolActivity[]
+  parts: ChatPart[]
   streaming: boolean
-}
-
-interface ActivePreset {
-  name: string
-  style_prompt: string
-  narration_style: string
-  video_length_minutes: number
-  voice_speaker: string
-  voice_language: string
-  video_provider: string
-  style_pack?: string | null
-  default_visual_engine?: string | null
-  sfx_style?: string | null
-  tts_provider?: string | null
-  voicebox_profile?: string | null
 }
 
 interface ChatPanelProps {
   /** The currently-viewed run id, sent with each user message for context. */
   currentRunId: string | null
-  /** The currently-viewed run title, used to recover chat/run associations. */
-  currentRunTitle?: string | null
   /** The active project — conversations are scoped to it. */
   currentProjectId: string | null
+  /** The active project's server-side conversation records, used to seed the
+   * chat list so conversations survive a fresh browser / cleared storage. */
+  serverConversations?: ProjectConversation[] | null
   /** Called when Claude writes/updates an artifact, so the viewer can refresh. */
   onArtifactUpdated: (runId: string) => void
+  /** Called when the user opens a conversation bound to a run, so the viewer
+   * can follow along. */
+  onRunSelected?: (runId: string) => void
   /** Reports websocket connection state up to the top bar. */
   onConnectionChange: (connected: boolean) => void
   /** Active preset settings to pass to the agent. */
-  activePreset?: ActivePreset | null
+  activePreset?: Preset | null
 }
 
 // ── Icons ───────────────────────────────────────────────────────────────────────
@@ -156,6 +156,31 @@ function friendlyToolLabel(rawName: string): string {
   return spaced.charAt(0).toUpperCase() + spaced.slice(1)
 }
 
+// ── Ordered rendering blocks ──────────────────────────────────────────────────
+// Resolve ChatPart -> renderable blocks, merging adjacent same-kind parts
+// (consecutive tool calls still read as one grouped activity box, just now
+// interleaved with the text around them instead of always trailing it).
+
+type MessageBlock = { kind: 'text'; text: string } | { kind: 'tools'; tools: ToolActivity[] }
+
+function groupMessageParts(m: ChatMessage): MessageBlock[] {
+  const toolsById = new Map(m.tools.map((t) => [t.id, t]))
+  const blocks: MessageBlock[] = []
+  for (const part of m.parts) {
+    const last = blocks[blocks.length - 1]
+    if (part.kind === 'text') {
+      if (last && last.kind === 'text') last.text += part.text
+      else blocks.push({ kind: 'text', text: part.text })
+    } else {
+      const tool = toolsById.get(part.id)
+      if (!tool) continue
+      if (last && last.kind === 'tools') last.tools.push(tool)
+      else blocks.push({ kind: 'tools', tools: [tool] })
+    }
+  }
+  return blocks
+}
+
 // ── Component ─────────────────────────────────────────────────────────────────
 
 let _idCounter = 1
@@ -189,17 +214,42 @@ function normalizeTool(tool: Partial<ToolActivity>, settleRunning = false): Tool
   }
 }
 
-function normalizeMessage(message: Partial<ChatMessage>, settleRunning = false): ChatMessage | null {
+function isChatPart(value: unknown): value is ChatPart {
+  if (!value || typeof value !== 'object') return false
+  const p = value as { kind?: unknown; text?: unknown; id?: unknown }
+  if (p.kind === 'text') return typeof p.text === 'string'
+  if (p.kind === 'tool') return typeof p.id === 'number'
+  return false
+}
+
+interface NormalizeMessageInput extends Omit<Partial<ChatMessage>, 'tools'> {
+  tools?: Partial<ToolActivity>[]
+}
+
+function normalizeMessage(message: NormalizeMessageInput, settleRunning = false): ChatMessage | null {
   if (message.role !== 'user' && message.role !== 'assistant' && message.role !== 'error') {
     return null
   }
   const id = typeof message.id === 'number' ? message.id : nextId()
   _idCounter = Math.max(_idCounter, id + 1)
+  const text = typeof message.text === 'string' ? message.text : ''
+  const tools = Array.isArray(message.tools) ? message.tools.map((tool) => normalizeTool(tool, settleRunning)) : []
+  // Live-streamed messages record true text/tool interleaving in `parts` as
+  // it happens. Older localStorage entries and server-hydrated history only
+  // know "all the text" and "all the tools" with no relative order between
+  // them, so those fall back to the original text-then-tools presentation.
+  const parts: ChatPart[] = Array.isArray(message.parts) && message.parts.every(isChatPart)
+    ? message.parts
+    : [
+        ...(text ? [{ kind: 'text' as const, text }] : []),
+        ...tools.map((t) => ({ kind: 'tool' as const, id: t.id })),
+      ]
   return {
     id,
     role: message.role,
-    text: typeof message.text === 'string' ? message.text : '',
-    tools: Array.isArray(message.tools) ? message.tools.map((tool) => normalizeTool(tool, settleRunning)) : [],
+    text,
+    tools,
+    parts,
     streaming: settleRunning ? false : Boolean(message.streaming),
   }
 }
@@ -250,60 +300,13 @@ function flowTitle(runId: string | null) {
   return runId ? `Flow ${runId.replace(/^run_/, '').slice(0, 8)}` : 'New Chat'
 }
 
-const TITLE_STOP_WORDS = new Set([
-  'about', 'after', 'before', 'bonaparte', 'code', 'create', 'figure', 'flow',
-  'history', 'make', 'stick', 'that', 'the', 'this', 'video', 'with', 'youtube',
-])
-
-function titleTokens(text: string | null | undefined): string[] {
-  if (!text) return []
-  return text
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, ' ')
-    .split(/\s+/)
-    .filter((token) => token.length >= 4 && !TITLE_STOP_WORDS.has(token))
+function serverMessagesToChat(serverMessages: ServerChatMessage[]): ChatMessage[] {
+  return serverMessages
+    .map((m) => normalizeMessage({ role: m.role, text: m.text || '', tools: m.tools || [] }, true))
+    .filter((m): m is ChatMessage => Boolean(m))
 }
 
-function conversationSearchText(conversation: Conversation): string {
-  const firstUser = conversation.messages.find((message) => message.role === 'user')?.text || ''
-  return `${conversation.title} ${firstUser}`.toLowerCase()
-}
-
-function conversationMatchesRun(conversation: Conversation, runTitle: string | null | undefined): boolean {
-  const tokens = titleTokens(runTitle)
-  if (tokens.length === 0) return false
-  const haystack = conversationSearchText(conversation)
-  const score = tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0)
-  return score >= 2
-}
-
-function looksLikeVideoCreationRequest(conversation: Conversation): boolean {
-  const haystack = conversationSearchText(conversation)
-  return /\b(create|make|generate|build)\b/.test(haystack)
-    && /\b(video|youtube|short|stick|figure|history)\b/.test(haystack)
-}
-
-function findLikelyConversationForRun(
-  conversations: Conversation[],
-  runId: string,
-  runTitle: string | null | undefined,
-): Conversation | null {
-  const tokens = titleTokens(runTitle)
-  if (tokens.length === 0) return null
-  let best: { conversation: Conversation; score: number } | null = null
-  for (const conversation of conversations) {
-    if (conversation.runId === runId) continue
-    if (!conversation.messages.some((message) => message.role === 'user')) continue
-    const haystack = conversationSearchText(conversation)
-    const score = tokens.reduce((sum, token) => sum + (haystack.includes(token) ? 1 : 0), 0)
-    if (score >= 2 && (!best || score > best.score)) {
-      best = { conversation, score }
-    }
-  }
-  return best?.conversation || null
-}
-
-export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onArtifactUpdated, onConnectionChange, activePreset }: ChatPanelProps) {
+export function ChatPanel({ currentRunId, currentProjectId, serverConversations, onArtifactUpdated, onRunSelected, onConnectionChange, activePreset }: ChatPanelProps) {
   const initialConversations = useMemo(() => loadConversations(), [])
   const [conversations, setConversations] = useState<Conversation[]>(initialConversations)
   const [activeConvoId, setActiveConvoId] = useState<string | null>(initialConversations[0]?.id ?? null)
@@ -338,22 +341,18 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
   const switchConversation = useCallback((id: string) => {
     const convo = conversations.find(c => c.id === id)
     if (convo) {
-      if (
-        currentRunId
-        && convo.runId !== currentRunId
-        && !conversations.some(c => c.runId === currentRunId)
-        && (conversationMatchesRun(convo, currentRunTitle) || looksLikeVideoCreationRequest(convo))
-      ) {
-        commitConversations(prev => (
-          prev.map(c => (c.id === id ? { ...c, runId: currentRunId } : c))
-        ))
-      }
       setActiveConvoId(id)
       setDraftForRunId(null)
       setManualConversationId(id)
       setShowHistory(false)
+      // Follow the conversation's bound run in the viewer. Binding itself
+      // only ever comes from server frames (artifact_updated/done) — never
+      // from guessing here.
+      if (convo.runId && convo.runId !== currentRunId) {
+        onRunSelected?.(convo.runId)
+      }
     }
-  }, [commitConversations, conversations, currentRunId, currentRunTitle])
+  }, [conversations, currentRunId, onRunSelected])
 
   const newConversation = useCallback(() => {
     setActiveConvoId(null)
@@ -389,6 +388,20 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
   const wsRef = useRef<ChatWebSocket | null>(null)
   const activeAssistantIds = useRef<Record<string, number>>({})
   const inFlightConvoId = useRef<string | null>(null)
+  // Reconnect bookkeeping: the socket dropped mid-turn, so the done/error
+  // frame died with it. We ask the server to reclaim the turn on reconnect
+  // and re-sync the conversation from the server transcript when it settles.
+  const connectedRef = useRef(false)
+  const pendingResumeConvoRef = useRef<string | null>(null)
+  // A page reload has no memory of whether the active conversation had a
+  // turn detached server-side (localStorage always settles streaming to
+  // false on load) — so on the very first connect, ask the server once
+  // whether the initially-active conversation is still going.
+  const hasCheckedInitialResumeRef = useRef(false)
+  const interruptedConvosRef = useRef<Set<string>>(new Set())
+  const interruptNoteIds = useRef<Record<string, number>>({})
+  const conversationsRef = useRef(conversations)
+  useEffect(() => { conversationsRef.current = conversations }, [conversations])
   const messagesEndRef = useRef<HTMLDivElement>(null)
   // currentRunId can change; keep a ref so the send handler always sees the latest.
   const runIdRef = useRef<string | null>(currentRunId)
@@ -437,7 +450,9 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [projectKey])
 
-  // Keep the chat panel tied to the selected flow without saving empty ghost chats.
+  // Keep the chat panel tied to the selected flow without saving empty ghost
+  // chats. Only exact runId bindings count — fuzzy title matching used to
+  // mis-bind old chats to unrelated runs.
   useEffect(() => {
     if (!currentRunId || busy) return
     if (manualConversationId) return
@@ -451,14 +466,6 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
       return
     }
 
-    const likely = findLikelyConversationForRun(visibleConversations, currentRunId, currentRunTitle)
-    if (likely) {
-      bindConversationToRun(likely.id, currentRunId)
-      setActiveConvoId(likely.id)
-      setShowHistory(false)
-      return
-    }
-
     if (activeConversation?.runId && activeConversation.runId !== currentRunId) {
       setActiveConvoId(null)
       setShowHistory(false)
@@ -466,13 +473,11 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
   }, [
     activeConversation?.runId,
     activeConvoId,
-    bindConversationToRun,
     busy,
-    conversations,
     currentRunId,
-    currentRunTitle,
     draftForRunId,
     manualConversationId,
+    visibleConversations,
   ])
 
   // Hydrate the active conversation from the server-side transcript. Local
@@ -487,19 +492,74 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
         if (cancelled || serverMessages.length === 0) return
         commitConversations(prev => prev.map(c => {
           if (c.id !== activeConvoId || serverMessages.length <= c.messages.length) return c
-          const messages: ChatMessage[] = serverMessages.map((m) => ({
-            id: nextId(),
-            role: m.role,
-            text: m.text || '',
-            tools: (m.tools || []).map((t) => normalizeTool(t, true)),
-            streaming: false,
-          }))
-          return { ...c, messages }
+          return { ...c, messages: serverMessagesToChat(serverMessages) }
         }))
       })
       .catch(() => {})
     return () => { cancelled = true }
   }, [activeConvoId, busy, commitConversations])
+
+  // Re-sync a conversation from the server transcript unconditionally — used
+  // after a turn that outlived a disconnect settles, when the server copy is
+  // authoritative (frames streamed while the socket was down are lost).
+  const forceHydrateFromServer = useCallback((conversationId: string) => {
+    fetchConversationMessages(conversationId)
+      .then((serverMessages) => {
+        if (serverMessages.length === 0) return
+        commitConversations(prev => prev.map(c => (
+          c.id === conversationId ? { ...c, messages: serverMessagesToChat(serverMessages) } : c
+        )))
+      })
+      .catch(() => {})
+  }, [commitConversations])
+
+  // Seed the conversation list from the active project's server-side records
+  // so chats survive a fresh browser or cleared localStorage. Merge by id:
+  // the server wins on claude_session_id, localStorage wins on local state.
+  useEffect(() => {
+    const records = serverConversations || []
+    if (records.length === 0) return
+    let cancelled = false
+    const known = new Map(conversationsRef.current.map(c => [c.id, c]))
+    const missing = records.filter(r => !known.has(r.id))
+    const sessionUpdates = records.filter(r => {
+      const local = known.get(r.id)
+      return local && r.claude_session_id && local.claudeSessionId !== r.claude_session_id
+    })
+    if (missing.length === 0 && sessionUpdates.length === 0) return
+    Promise.all(missing.map(async (record) => {
+      try {
+        return { record, messages: await fetchConversationMessages(record.id) }
+      } catch {
+        return { record, messages: [] as ServerChatMessage[] }
+      }
+    })).then((fetched) => {
+      if (cancelled) return
+      commitConversations(prev => {
+        let next = prev
+        if (sessionUpdates.length > 0) {
+          const byId = new Map(sessionUpdates.map(r => [r.id, r.claude_session_id as string]))
+          next = next.map(c => (byId.has(c.id) ? { ...c, claudeSessionId: byId.get(c.id)! } : c))
+        }
+        const additions: Conversation[] = []
+        for (const { record, messages } of fetched) {
+          if (messages.length === 0) continue
+          if (next.some(c => c.id === record.id)) continue
+          additions.push({
+            id: record.id,
+            title: record.title || 'New chat',
+            messages: serverMessagesToChat(messages),
+            createdAt: Math.round(((record.updated_at ?? record.created_at) || 0) * 1000),
+            runId: null,
+            claudeSessionId: record.claude_session_id ?? null,
+            projectId: projectKey,
+          })
+        }
+        return additions.length > 0 ? [...next, ...additions] : next
+      })
+    })
+    return () => { cancelled = true }
+  }, [serverConversations, projectKey, commitConversations])
 
   const updateConversationMessages = useCallback((
     conversationId: string,
@@ -540,7 +600,18 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
           }
           break
         case 'assistant_text':
-          updateAssistantForConversation(targetId, (m) => ({ ...m, text: m.text + msg.text }))
+          updateAssistantForConversation(targetId, (m) => {
+            // Extend the trailing text part so text keeps rendering where it
+            // arrived instead of jumping to the end of the message.
+            const parts = [...m.parts]
+            const last = parts[parts.length - 1]
+            if (last && last.kind === 'text') {
+              parts[parts.length - 1] = { kind: 'text', text: last.text + msg.text }
+            } else {
+              parts.push({ kind: 'text', text: msg.text })
+            }
+            return { ...m, text: m.text + msg.text, parts }
+          })
           break
         case 'tool_use':
           updateAssistantForConversation(targetId, (m) => {
@@ -550,12 +621,13 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
             const prior = msg.id
               ? m.tools
               : m.tools.map((t) => (t.status === 'running' ? { ...t, status: 'done' as ToolStatus } : t))
+            const newTool: ToolActivity = {
+              id: nextId(), name: msg.name, summary: msg.summary, status: 'running', toolUseId: msg.id,
+            }
             return {
               ...m,
-              tools: [
-                ...prior,
-                { id: nextId(), name: msg.name, summary: msg.summary, status: 'running', toolUseId: msg.id },
-              ],
+              tools: [...prior, newTool],
+              parts: [...m.parts, { kind: 'tool', id: newTool.id }],
             }
           })
           break
@@ -586,6 +658,35 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
           }
           onArtifactUpdated(msg.run_id)
           break
+        case 'resumed': {
+          // The server reclaimed a turn that outlived a disconnect; go back
+          // to the normal busy/streaming state.
+          const convoId = msg.conversation_id
+          if (convoId) {
+            inFlightConvoId.current = convoId
+            setBusy(true)
+            const noteId = interruptNoteIds.current[convoId]
+            if (noteId != null) {
+              delete interruptNoteIds.current[convoId]
+              updateConversationMessages(convoId, (prev) => prev.filter((m) => m.id !== noteId))
+            }
+            if (activeAssistantIds.current[convoId] == null) {
+              // A page reload has no record of which message was mid-stream
+              // (activeAssistantIds starts empty every mount) — without a
+              // placeholder to attach to, the reclaimed text/tool frames
+              // would silently have nowhere to go.
+              const assistantId = nextId()
+              activeAssistantIds.current[convoId] = assistantId
+              updateConversationMessages(convoId, (prev) => [
+                ...prev,
+                { id: assistantId, role: 'assistant', text: '', tools: [], parts: [], streaming: true },
+              ])
+            } else {
+              updateAssistantForConversation(convoId, (m) => ({ ...m, streaming: true }))
+            }
+          }
+          break
+        }
         case 'done':
           if (targetId && msg.run_id && msg.run_id !== 'unknown') {
             bindConversationToRun(targetId, msg.run_id)
@@ -599,29 +700,85 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
           if (targetId) delete activeAssistantIds.current[targetId]
           inFlightConvoId.current = null
           setBusy(false)
+          if (targetId && interruptedConvosRef.current.has(targetId)) {
+            interruptedConvosRef.current.delete(targetId)
+            delete interruptNoteIds.current[targetId]
+            forceHydrateFromServer(targetId)
+          }
           break
         case 'error':
           if (targetId) {
             updateConversationMessages(targetId, (prev) => [
               ...prev,
-              { id: nextId(), role: 'error', text: msg.message, tools: [], streaming: false },
+              { id: nextId(), role: 'error', text: msg.message, tools: [], parts: [], streaming: false },
             ])
             delete activeAssistantIds.current[targetId]
           }
           inFlightConvoId.current = null
           setBusy(false)
+          if (targetId && interruptedConvosRef.current.has(targetId)) {
+            interruptedConvosRef.current.delete(targetId)
+            delete interruptNoteIds.current[targetId]
+            forceHydrateFromServer(targetId)
+          }
           break
       }
     },
-    [bindConversationToRun, commitConversations, onArtifactUpdated, updateAssistantForConversation, updateConversationMessages],
+    [bindConversationToRun, commitConversations, forceHydrateFromServer, onArtifactUpdated, updateAssistantForConversation, updateConversationMessages],
   )
 
   // ── Connect the websocket once on mount ─────────────────────────────────────
   useEffect(() => {
     const ws = new ChatWebSocket({
       onMessage: handleMessage,
-      onOpen: () => onConnectionChange(true),
-      onClose: () => onConnectionChange(false),
+      onOpen: () => {
+        connectedRef.current = true
+        onConnectionChange(true)
+        // If the socket dropped mid-turn, ask the server to reclaim the turn
+        // it kept running; it answers with `resumed` (still going) or `done`.
+        // On the very first connect (page load/reload), we have no such
+        // witnessed drop to go on, so fall back to asking about whatever
+        // conversation is initially active — a resume check is a harmless
+        // no-op (server replies `done`) when nothing was actually in flight.
+        const witnessedDropConvoId = pendingResumeConvoRef.current
+        pendingResumeConvoRef.current = null
+        const convoId = witnessedDropConvoId
+          || (!hasCheckedInitialResumeRef.current ? activeConvoIdRef.current : null)
+        hasCheckedInitialResumeRef.current = true
+        if (convoId) {
+          ws.send({ type: 'resume', conversation_id: convoId })
+        }
+      },
+      onClose: () => {
+        connectedRef.current = false
+        onConnectionChange(false)
+        const convoId = inFlightConvoId.current
+        if (convoId) {
+          // The done/error frame for this turn died with the socket. The
+          // server keeps the turn alive for a grace window; say so honestly
+          // and unlock the input instead of spinning forever.
+          inFlightConvoId.current = null
+          pendingResumeConvoRef.current = convoId
+          interruptedConvosRef.current.add(convoId)
+          // Keep activeAssistantIds so a reclaimed turn streams back into
+          // the same message bubble.
+          updateAssistantForConversation(convoId, (m) => ({ ...m, streaming: false }))
+          const noteId = nextId()
+          interruptNoteIds.current[convoId] = noteId
+          updateConversationMessages(convoId, (prev) => [
+            ...prev,
+            {
+              id: noteId,
+              role: 'error',
+              text: 'Connection lost — Claude may still be working; reconnecting…',
+              tools: [],
+              parts: [],
+              streaming: false,
+            },
+          ])
+          setBusy(false)
+        }
+      },
     })
     wsRef.current = ws
     return () => ws.destroy()
@@ -638,10 +795,13 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
   function send() {
     const text = input.trim()
     if (!text || busy || !wsRef.current) return
+    // Never pretend a message went out on a dead socket — that used to lock
+    // the input behind an eternal spinner.
+    if (!connectedRef.current) return
 
-    const userMsg: ChatMessage = { id: nextId(), role: 'user', text, tools: [], streaming: false }
+    const userMsg: ChatMessage = { id: nextId(), role: 'user', text, tools: [], parts: [], streaming: false }
     const assistantId = nextId()
-    const assistantMsg: ChatMessage = { id: assistantId, role: 'assistant', text: '', tools: [], streaming: true }
+    const assistantMsg: ChatMessage = { id: assistantId, role: 'assistant', text: '', tools: [], parts: [], streaming: true }
     const runId = activeConversation?.runId || runIdRef.current
     const conversationId = activeConversation?.id || newConvoId()
     const claudeSessionId = activeConversation?.claudeSessionId || null
@@ -791,43 +951,59 @@ export function ChatPanel({ currentRunId, currentRunTitle, currentProjectId, onA
         )}
 
         {messages.map((m) => {
+          if (m.role !== 'assistant') {
+            return (
+              <div className={`msg-row ${m.role}`} key={m.id}>
+                <span className="msg-role-label">{m.role === 'user' ? 'You' : 'Error'}</span>
+                <div className={`msg-bubble ${m.role}`}>{m.text}</div>
+              </div>
+            )
+          }
+
           const hasRunningTool = m.tools.some((t) => t.status === 'running')
-          const showThinkingBubble = m.role === 'assistant' && m.streaming && !m.text && m.tools.length === 0
-          const showBubble = !showThinkingBubble && (Boolean(m.text) || m.role !== 'assistant' || m.tools.length === 0)
-          const showTrailingThinking = m.role === 'assistant' && m.streaming && !m.text && m.tools.length > 0 && !hasRunningTool
+          const blocks = groupMessageParts(m)
+          const showThinkingBubble = m.streaming && blocks.length === 0
+          const lastBlock = blocks[blocks.length - 1]
+          const showTrailingThinking = m.streaming && lastBlock?.kind === 'tools' && !hasRunningTool
+
           return (
-            <div className={`msg-row ${m.role}`} key={m.id}>
-              <span className="msg-role-label">{m.role === 'user' ? 'You' : m.role === 'error' ? 'Error' : 'Claude'}</span>
-              {showBubble && (
-                <div className={`msg-bubble ${m.role}`}>
-                  {m.text}
-                  {m.streaming && <span className="msg-cursor" />}
-                </div>
-              )}
+            <div className="msg-row assistant" key={m.id}>
+              <span className="msg-role-label">Claude</span>
+              {blocks.map((block, i) => {
+                const isLast = i === blocks.length - 1
+                if (block.kind === 'text') {
+                  return (
+                    <div className="msg-bubble assistant" key={i}>
+                      {block.text}
+                      {isLast && m.streaming && <span className="msg-cursor" />}
+                    </div>
+                  )
+                }
+                return (
+                  <div className="tool-activities" key={i}>
+                    {block.tools.map((t) => (
+                      <div className={`tool-activity ${t.status}`} key={t.id} title={t.error || undefined}>
+                        <span className="tool-activity-icon">
+                          {t.status === 'running' ? <span className="spinner" /> : t.status === 'done' ? <CheckIcon /> : <FailIcon />}
+                        </span>
+                        <span className="tool-activity-label">{friendlyToolLabel(t.name)}</span>
+                        {t.status === 'failed' && <span className="tool-activity-flag">didn’t work</span>}
+                        {t.summary && <span className="tool-activity-summary">{t.summary}</span>}
+                      </div>
+                    ))}
+                    {isLast && showTrailingThinking && (
+                      <div className="tool-activity running">
+                        <span className="tool-activity-icon"><span className="spinner" /></span>
+                        <span className="tool-activity-label">Thinking about the next step…</span>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
               {showThinkingBubble && (
                 <div className="msg-thinking">
                   <span className="msg-thinking-dots"><span /><span /><span /></span>
                   Thinking it through…
-                </div>
-              )}
-              {m.tools.length > 0 && (
-                <div className="tool-activities">
-                  {m.tools.map((t) => (
-                    <div className={`tool-activity ${t.status}`} key={t.id} title={t.error || undefined}>
-                      <span className="tool-activity-icon">
-                        {t.status === 'running' ? <span className="spinner" /> : t.status === 'done' ? <CheckIcon /> : <FailIcon />}
-                      </span>
-                      <span className="tool-activity-label">{friendlyToolLabel(t.name)}</span>
-                      {t.status === 'failed' && <span className="tool-activity-flag">didn’t work</span>}
-                      {t.summary && <span className="tool-activity-summary">{t.summary}</span>}
-                    </div>
-                  ))}
-                  {showTrailingThinking && (
-                    <div className="tool-activity running">
-                      <span className="tool-activity-icon"><span className="spinner" /></span>
-                      <span className="tool-activity-label">Thinking about the next step…</span>
-                    </div>
-                  )}
                 </div>
               )}
             </div>

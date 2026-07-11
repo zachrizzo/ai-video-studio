@@ -1,9 +1,14 @@
-import { useRef, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Segment, SegmentStatus } from '../api'
+import { formatDuration } from './formatters'
 
 // ── Status Badge ─────────────────────────────────────────────────────────────
 
-const STATUS_META: Record<SegmentStatus, { label: string; tone: string }> = {
+// Display metadata for the segment statuses the backend emits today
+// (src/studio/runs.py, _segment_status). A status this map doesn't know —
+// e.g. one added on the backend before this list catches up — still renders,
+// as a neutral badge with the raw value humanized.
+const STATUS_META: Partial<Record<string, { label: string; tone: string }>> = {
   approved: { label: 'Approved', tone: 'badge-success' },
   done: { label: 'Ready', tone: 'badge-success' },
   needs_review: { label: 'Needs review', tone: 'badge-warning' },
@@ -14,7 +19,10 @@ const STATUS_META: Record<SegmentStatus, { label: string; tone: string }> = {
 }
 
 function StatusBadge({ status }: { status: SegmentStatus }) {
-  const meta = STATUS_META[status]
+  const meta = STATUS_META[status] ?? {
+    label: status.replace(/_/g, ' '),
+    tone: 'badge-neutral',
+  }
   return (
     <span className={`badge ${meta.tone} status-badge${status === 'generating' ? ' generating' : ''}`}>
       <span className="status-dot" />
@@ -24,13 +32,6 @@ function StatusBadge({ status }: { status: SegmentStatus }) {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
-
-function formatDuration(s: number): string {
-  if (!s) return ''
-  const m = Math.floor(s / 60)
-  const sec = Math.round(s % 60)
-  return m > 0 ? `${m}m ${sec}s` : `${sec}s`
-}
 
 function zeroPad(n: number): string {
   return String(n).padStart(2, '0')
@@ -78,6 +79,69 @@ function AudioButton({ src }: { src: string }) {
   )
 }
 
+// ── ImageLightbox ────────────────────────────────────────────────────────────
+
+interface ImageLightboxProps {
+  images: string[]
+  index: number
+  title: string
+  onClose: () => void
+  onIndexChange: (index: number) => void
+}
+
+function ImageLightbox({ images, index, title, onClose, onIndexChange }: ImageLightboxProps) {
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if (e.key === 'Escape') onClose()
+      if (e.key === 'ArrowRight' && index < images.length - 1) onIndexChange(index + 1)
+      if (e.key === 'ArrowLeft' && index > 0) onIndexChange(index - 1)
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [index, images.length, onClose, onIndexChange])
+
+  return (
+    <div className="lightbox-overlay" onClick={onClose}>
+      <button className="lightbox-close" onClick={onClose} aria-label="Close">
+        <svg width="18" height="18" viewBox="0 0 18 18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <path d="M3 3l12 12M15 3L3 15" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+      </button>
+      {images.length > 1 && index > 0 && (
+        <button
+          className="lightbox-nav lightbox-prev"
+          onClick={(e) => { e.stopPropagation(); onIndexChange(index - 1) }}
+          aria-label="Previous image"
+        >
+          <svg width="14" height="22" viewBox="0 0 14 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M11 2L2 11l9 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
+      {images.length > 1 && index < images.length - 1 && (
+        <button
+          className="lightbox-nav lightbox-next"
+          onClick={(e) => { e.stopPropagation(); onIndexChange(index + 1) }}
+          aria-label="Next image"
+        >
+          <svg width="14" height="22" viewBox="0 0 14 22" fill="none" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 2l9 9-9 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
+      <img
+        className="lightbox-image"
+        src={images[index]}
+        alt={`${title} — image ${index + 1} of ${images.length}`}
+        onClick={(e) => e.stopPropagation()}
+      />
+      {images.length > 1 && (
+        <div className="lightbox-caption">{index + 1} / {images.length}</div>
+      )}
+    </div>
+  )
+}
+
 // ── SegmentCard ────────────────────────────────────────────────────────────────
 
 interface SegmentCardProps {
@@ -105,6 +169,7 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
   const clipUrls = segment.clip_urls?.length ? segment.clip_urls : clip_url ? [clip_url] : []
   const videoSrc = clipUrls[0] || scene_url || null
   const beatCount = visual_count || Math.max(imageUrls.length, clipUrls.length)
+  const [lightboxIndex, setLightboxIndex] = useState<number | null>(null)
 
   return (
     <div className="segment-card card">
@@ -171,10 +236,11 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
           <span className="section-title seg-col-label">Images</span>
           {imageUrls[0] ? (
             <img
-              className="seg-image"
+              className="seg-image seg-image-clickable"
               src={imageUrls[0]}
               alt={`Frame for ${section_title}`}
               loading="lazy"
+              onClick={() => setLightboxIndex(0)}
             />
           ) : (
             <div className="media-placeholder">No images yet</div>
@@ -183,17 +249,27 @@ export function SegmentCard({ segment, index }: SegmentCardProps) {
             <div className="beat-strip" aria-label={`${imageUrls.length} visual beats`}>
               {imageUrls.slice(0, 5).map((url, i) => (
                 <img
-                  className="beat-thumb"
+                  className="beat-thumb beat-thumb-clickable"
                   src={url}
                   alt={`${section_title} visual ${i + 1}`}
                   loading="lazy"
                   key={url}
+                  onClick={() => setLightboxIndex(i)}
                 />
               ))}
               {imageUrls.length > 5 && (
                 <span className="beat-more">+{imageUrls.length - 5}</span>
               )}
             </div>
+          )}
+          {lightboxIndex !== null && (
+            <ImageLightbox
+              images={imageUrls}
+              index={lightboxIndex}
+              title={section_title}
+              onClose={() => setLightboxIndex(null)}
+              onIndexChange={setLightboxIndex}
+            />
           )}
         </div>
 

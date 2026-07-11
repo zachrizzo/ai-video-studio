@@ -1,24 +1,67 @@
 """Run discovery and manifest building for the Video Studio backend.
 
-A "run" is any immediate subdirectory of RUNS_ROOT whose name starts with
-``run_`` and which contains a ``script.json`` file.
+A "run" is any immediate subdirectory of the runs root whose name starts with
+``run_`` and which contains a ``script.json`` file. The root defaults to
+``<studio_home>/runs`` (durable, ~/.video-studio) and can be overridden with
+the STUDIO_RUNS_DIR env var; a one-time migration moves run data from the
+legacy /tmp location, which macOS periodically wipes.
 """
 
 from __future__ import annotations
 
 import json
+import logging
 import os
+import shutil
 from pathlib import Path
 from typing import Any
 
-# Default location; overridden by env var STUDIO_RUNS_DIR
-RUNS_ROOT = Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+from src.studio import config
+
+logger = logging.getLogger(__name__)
+
+_LEGACY_RUNS_ROOT = Path("/tmp/mongol-video")
+_legacy_migration_done = False
+
 PRODUCTION_STATUS_FILE = ".production_status.json"
+
+
+def _migrate_legacy_runs(root: Path) -> None:
+    """One-time move of run data from the legacy /tmp root into *root*.
+
+    Only fires for the default (durable) root — an explicit STUDIO_RUNS_DIR
+    override never triggers it — and only when the new root is empty, so it
+    can never clobber existing data.
+    """
+    global _legacy_migration_done
+    if _legacy_migration_done:
+        return
+    _legacy_migration_done = True
+    try:
+        legacy = _LEGACY_RUNS_ROOT
+        if legacy == root or not legacy.is_dir():
+            return
+        entries = list(legacy.iterdir())
+        if not entries:
+            return
+        if root.exists() and any(root.iterdir()):
+            return
+        root.mkdir(parents=True, exist_ok=True)
+        for child in entries:
+            shutil.move(str(child), str(root / child.name))
+        logger.info("Migrated runs from %s to %s", legacy, root)
+    except Exception:  # noqa: BLE001
+        logger.warning("Failed to migrate runs from %s", _LEGACY_RUNS_ROOT, exc_info=True)
 
 
 def _runs_root() -> Path:
     """Return the current runs root (respects live env-var changes)."""
-    return Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+    env = os.environ.get("STUDIO_RUNS_DIR", "")
+    if env:
+        return Path(env).expanduser()
+    root = config.studio_home() / "runs"
+    _migrate_legacy_runs(root)
+    return root
 
 
 # ---------------------------------------------------------------------------
@@ -43,7 +86,7 @@ def _load_production_status(run_dir: Path) -> dict[str, Any] | None:
 def _scene_url(run_dir: Path, segment_id: str) -> str | None:
     """Return the media URL for a rendered scene mp4, or None if not present."""
     render_dir = run_dir / "scenes" / f"{segment_id}_render"
-    for suffix in ("html", "manim"):
+    for suffix in ("html", "manim", "collage"):
         mp4 = render_dir / f"{segment_id}_{suffix}.mp4"
         if mp4.exists():
             run_id = run_dir.name
@@ -188,18 +231,22 @@ def _segment_status(
 
 
 def list_runs() -> list[dict[str, Any]]:
-    """Return summary info for every valid run in RUNS_ROOT."""
+    """Return summary info for every valid run, most recently touched first."""
     root = _runs_root()
     if not root.is_dir():
         return []
 
-    results: list[dict[str, Any]] = []
-    for child in sorted(root.iterdir()):
+    entries: list[tuple[float, dict[str, Any]]] = []
+    for child in root.iterdir():
         if not child.is_dir() or not child.name.startswith("run_"):
             continue
         script_path = child / "script.json"
         if not script_path.exists():
             continue
+        try:
+            mtime = script_path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
         script = _load_json(script_path)
         run_id = child.name
         title = script.get("title", run_id)
@@ -208,18 +255,24 @@ def list_runs() -> list[dict[str, Any]]:
         final_url = f"/media/{run_id}/final.mp4" if has_final else None
         qa_report = _load_json(child / "qa_report.json")
         production = _load_production_status(child)
-        results.append(
-            {
-                "id": run_id,
-                "title": title,
-                "segment_count": len(segments),
-                "has_final_video": has_final,
-                "final_video_url": final_url,
-                "qa_status": qa_report.get("status"),
-                "production": production,
-            }
+        entries.append(
+            (
+                mtime,
+                {
+                    "id": run_id,
+                    "title": title,
+                    "segment_count": len(segments),
+                    "has_final_video": has_final,
+                    "final_video_url": final_url,
+                    "qa_status": qa_report.get("status"),
+                    "production": production,
+                },
+            )
         )
-    return results
+    # Newest first so the viewer's default selection is the latest work,
+    # not whichever random hex id sorts lowest.
+    entries.sort(key=lambda item: item[0], reverse=True)
+    return [entry for _, entry in entries]
 
 
 def get_run(run_id: str) -> dict[str, Any] | None:

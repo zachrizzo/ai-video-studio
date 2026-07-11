@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { TTS_LANGUAGES, TTS_SPEAKERS } from '../constants'
 import '../styles/generate-panel.css'
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
@@ -49,8 +50,6 @@ const SIDEBAR_GROUPS = [
 
 const LOCAL_MODES: GenMode[] = ['text-to-image', 'text-to-speech', 'text-to-video', 'image-to-video', 'audio-to-video', 'retake', 'extend']
 
-const TTS_SPEAKERS = ['serena', 'vivian', 'aiden', 'dylan', 'eric', 'ono_anna', 'ryan', 'sohee', 'uncle_fu']
-const TTS_LANGUAGES = ['auto', 'english', 'chinese', 'japanese', 'korean', 'german', 'french', 'russian', 'portuguese', 'spanish', 'italian']
 const TTS_MODELS = ['0.6B (Fast)', '1.7B (Quality)']
 
 const IMAGE_MODELS = ['FLUX Schnell', 'Z-Image Turbo']

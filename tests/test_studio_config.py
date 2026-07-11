@@ -122,16 +122,17 @@ def test_generations_migration_skipped_when_target_nonempty(studio_home: Path,
 # ---------------------------------------------------------------------------
 
 
-def test_agent_model_unset_returns_none(monkeypatch) -> None:
+def test_agent_model_unset_returns_pinned_default(monkeypatch) -> None:
+    """Unset must pin to Sonnet 5, not drift with the local CLI's own default."""
     monkeypatch.delenv("STUDIO_AGENT_MODEL", raising=False)
-    assert config.agent_model() is None
+    assert config.agent_model() == config.DEFAULT_AGENT_MODEL == "claude-sonnet-5"
 
 
-def test_agent_model_set_returns_value(monkeypatch) -> None:
-    monkeypatch.setenv("STUDIO_AGENT_MODEL", "claude-sonnet-5")
-    assert config.agent_model() == "claude-sonnet-5"
+def test_agent_model_set_returns_override(monkeypatch) -> None:
+    monkeypatch.setenv("STUDIO_AGENT_MODEL", "claude-opus-4-8")
+    assert config.agent_model() == "claude-opus-4-8"
 
 
-def test_agent_model_whitespace_returns_none(monkeypatch) -> None:
+def test_agent_model_whitespace_returns_pinned_default(monkeypatch) -> None:
     monkeypatch.setenv("STUDIO_AGENT_MODEL", "   ")
-    assert config.agent_model() is None
+    assert config.agent_model() == config.DEFAULT_AGENT_MODEL

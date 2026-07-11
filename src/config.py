@@ -23,7 +23,10 @@ class PipelineConfig(BaseSettings):
     # recommend a Chatterbox Turbo profile for English narration), or
     # "elevenlabs" (cloud, needs API key).
     voice_provider: Literal["elevenlabs", "qwen", "voicebox"] = "qwen"
-    qwen_tts_speaker: str = "dylan"
+    # Default speaker must match the one-shot tts default (generate.start_tts)
+    # so a run resumed through a different entry point keeps the same voice;
+    # tests/test_generate_oneshot.py pins the two together.
+    qwen_tts_speaker: str = "serena"
     qwen_tts_language: str = "english"
     qwen_tts_model_size: str = "0.6B"
     # Voicebox (jamiepine/voicebox) — the app must be RUNNING during synthesis;
@@ -55,6 +58,7 @@ class PipelineConfig(BaseSettings):
     image_quantize: int = 4  # mflux -q (4 or 8); 4 = lowest memory
     image_force: bool = False  # regenerate even if a PNG already exists
     video_force: bool = False  # regenerate MP4 clips even if they already exist
+    audio_force: bool = False  # re-synthesize narration even if a good take exists
     image_timeout_seconds: int = 900  # first run downloads a multi-GB model
 
     # Local video / motion generation

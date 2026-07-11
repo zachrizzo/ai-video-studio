@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from src.studio import capabilities, config, transcripts
+from src.studio.runs import _runs_root
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +41,7 @@ def _extract_run_id(tool_input: dict[str, Any]) -> str | None:
 
 def _snapshot_run_scripts() -> dict[str, float]:
     """Return script.json mtimes keyed by run id for changed-run detection."""
-    root = Path(os.environ.get("STUDIO_RUNS_DIR", "/tmp/mongol-video"))
+    root = _runs_root()
     if not root.is_dir():
         return {}
     mtimes: dict[str, float] = {}
@@ -55,8 +56,131 @@ def _snapshot_run_scripts() -> dict[str, float]:
                 continue
     return mtimes
 
+
+def _select_changed_runs(
+    before: dict[str, float],
+    after: dict[str, float],
+    seen_run_ids: set[str],
+) -> list[tuple[str, float]]:
+    """Runs whose script.json changed during a turn, newest first.
+
+    Only runs the turn actually touched (their id appeared in a tool input)
+    are eligible — concurrent terminal work or another tab touching an
+    unrelated run must not hijack the viewer's selection.
+    """
+    changed = [
+        (run_id, mtime)
+        for run_id, mtime in after.items()
+        if mtime > before.get(run_id, 0) and run_id in seen_run_ids
+    ]
+    changed.sort(key=lambda item: item[1], reverse=True)
+    return changed
+
+
+# ---------------------------------------------------------------------------
+# Detached turns: a dropped socket no longer kills the in-flight agent turn.
+# The turn keeps running (it already streams into the server transcript); a
+# reconnecting client claims it with a "resume" frame, and a watchdog
+# interrupts it after a grace window so no CLI subprocess runs unattended
+# forever.
+# ---------------------------------------------------------------------------
+
+_DETACHED_TURNS: dict[str, dict[str, Any]] = {}
+
+
+def _turn_grace_seconds() -> float:
+    try:
+        return float(os.environ.get("STUDIO_TURN_GRACE_SECONDS", "120"))
+    except ValueError:
+        return 120.0
+
+
+def _detach_turn(conversation_id: str, turn: dict[str, Any]) -> None:
+    """Register a still-running turn whose socket just dropped."""
+
+    async def _watchdog() -> None:
+        task = turn["task"]
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=_turn_grace_seconds())
+        except asyncio.TimeoutError:
+            holder = turn["holder"]
+            holder["stopped"] = True
+            transcripts.append_event(
+                conversation_id,
+                {
+                    "type": "error",
+                    "message": (
+                        "Interrupted: the browser disconnected mid-turn and did "
+                        "not reconnect in time."
+                    ),
+                },
+            )
+            client = holder.get("client")
+            if client is not None:
+                try:
+                    await client.interrupt()
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("grace-window interrupt failed: %s", exc)
+            try:
+                await asyncio.wait_for(task, timeout=15)
+            except Exception:  # noqa: BLE001
+                task.cancel()
+                try:
+                    await task
+                except (Exception, asyncio.CancelledError):  # noqa: BLE001
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception:  # noqa: BLE001
+            logger.exception("detached-turn watchdog failed")
+        finally:
+            if _DETACHED_TURNS.get(conversation_id) is turn:
+                _DETACHED_TURNS.pop(conversation_id, None)
+
+    turn["watchdog"] = asyncio.create_task(_watchdog())
+    _DETACHED_TURNS[conversation_id] = turn
+
+
+async def _interrupt_detached_turn(turn: dict[str, Any]) -> None:
+    """Stop a detached turn before starting a new one on its conversation."""
+    watchdog = turn.get("watchdog")
+    if watchdog is not None:
+        watchdog.cancel()
+    holder = turn["holder"]
+    holder["stopped"] = True
+    client = holder.get("client")
+    if client is not None:
+        try:
+            await client.interrupt()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("interrupt of detached turn failed: %s", exc)
+    try:
+        await asyncio.wait_for(turn["task"], timeout=15)
+    except Exception:  # noqa: BLE001
+        turn["task"].cancel()
+        try:
+            await turn["task"]
+        except (Exception, asyncio.CancelledError):  # noqa: BLE001
+            pass
+
+
 # Repository root (two levels up from this file: src/studio/agent.py → repo root)
 _REPO_ROOT = str(Path(__file__).resolve().parents[2])
+
+# Values interpolated into _STUDIO_BRIEF below so the brief can never drift
+# from the code that actually runs: the step order comes from the producer's
+# _pipeline_steps (the real execution order), the sfx sound names from the
+# sfx engine's SOUNDS registry, and the Voicebox URL from PipelineConfig.
+from src.audio.sfx import SOUNDS as _SFX_SOUNDS  # noqa: E402
+from src.config import PipelineConfig as _PipelineConfig  # noqa: E402
+from src.studio.producer import _pipeline_steps as _producer_pipeline_steps  # noqa: E402
+
+_FULL_STEP_NAMES = [name for name, _label, _args in _producer_pipeline_steps(Path("run"), "full")]
+_STEP_ORDER = " → ".join(
+    f"{name} (again)" if name in _FULL_STEP_NAMES[:i] else name
+    for i, name in enumerate(_FULL_STEP_NAMES)
+)
+_VOICEBOX_URL = _PipelineConfig.model_fields["voicebox_url"].default
 
 # Briefing appended to Claude Code's default system prompt so the chat agent
 # knows this project's REAL local generation capabilities.
@@ -70,11 +194,27 @@ A [capabilities] line below reports which local engines are currently available
 user how to enable it instead of pretending it works.
 
 Use the typed studio tools (mcp__studio__*) for ALL pipeline operations — do not
-shell out to the pipeline CLI or curl the REST API. Recommended order for a video:
-  create_run → Write <run_dir>/script.json → storyboard → synthesize → align →
-  sfx → imagegen → videogen → manifest → composite → qa
-(collage segments additionally: write scenes/{segment_id}.collage.json specs, then
-assets → collage between align and manifest).
+shell out to the pipeline CLI or curl the REST API. Recommended order for a video
+(the same order produce_run executes):
+  create_run → Write <run_dir>/script.json → %STEP_ORDER%
+Storyboard MUST be re-run after synthesize: the first pass uses script estimates,
+and the re-run updates beat timing from the real audio durations so clips are
+sized to the narration.
+(assets and collage only do work for collage segments — author
+scenes/{segment_id}.collage.json specs before assets; runs without collage
+segments skip both steps automatically).
+- Skip-if-exists + force: synthesize skips segments that already have a good
+  take, imagegen skips existing PNGs, videogen skips existing clips. Re-running
+  them without force=true changes NOTHING — a QA fix loop that omits force just
+  recomposites the identical video. To regenerate failing segments pass
+  force=true (plus segment_ids to limit scope); produce_run mode "videos"
+  likewise needs force_video=true to actually redo clips.
+- synthesize fails (is_error) when any segment's TTS fails or its audio still
+  carries QA issues after the retry; failed segments are marked "failed" with
+  duration 0 in the audio manifest, so downstream steps cannot pretend their
+  audio exists. Fix and re-run synthesize before continuing. The effective
+  voice persists in the manifest and is reused on resume unless you explicitly
+  pass voice params, so resumed runs never switch voices.
 - produce_run(run_id, mode, force_video, segment_ids) runs the full resumable
   production in the background; poll production_status(run_id). Use it when the
   user asks to continue/resume/finish a run that already has script.json. mode
@@ -85,20 +225,36 @@ assets → collage between align and manifest).
   generation_status(gen_id); list_generations shows recent ones. Never refuse a
   quick clip request or require a PDF — use generate_video or a one-segment run.
 - Discovery: list_runs, get_run(run_id), list_projects.
-- Voice: synthesize defaults to local Qwen3-TTS (speaker/language params). For
+- Voice: synthesize defaults to local Qwen3-TTS (speaker/language params;
+  qwen_model_size="1.7B" for higher quality than the default "0.6B"). For
   Voicebox voices pass voice_provider="voicebox" + voicebox_profile=<name>; the
-  Voicebox app (voicebox.sh) must be RUNNING at 127.0.0.1:17493 and there is no
+  Voicebox app (voicebox.sh) must be RUNNING at %VOICEBOX_URL% and there is no
   silent fallback — if unreachable, tell the user to launch it rather than
   switching providers. Never generate silent audio.
+- Images: imagegen defaults to model="z-image-turbo" (steps~8, quantize 4);
+  pass model="schnell" for a faster/lower-fidelity FLUX fallback, or override
+  steps/quantize directly. Only change these when the user asks for a
+  different look or speed/quality tradeoff, not by default.
 - Video: videogen defaults to LTX-2.3 (video_provider="ltx"), which turns each
   storyboard beat's action/camera_motion into a motion prompt. Use Ken Burns only
   when the user explicitly wants static/pan-only motion or as an LTX fallback.
+  Tune LTX with steps/resolution ("WIDTHxHEIGHT")/clip_seconds/cfg_scale/
+  stg_scale/prefer_extend when the user wants higher fidelity, a specific
+  frame size, or longer/shorter clips; fallback_to_kenburns/kenburns_zoom
+  control what happens when LTX fails — leave these at their defaults unless
+  asked.
 
 Bash stays available for ffprobe/file inspection and the `render` step: HTML/Manim
 diagram scenes still render via `uv run python -m src.pipeline render
-<scene_spec.json> <work_dir>`. HTML scenes must implement the deterministic seek
+<scene_spec.json> <work_dir>`. The work_dir MUST be `<run_dir>/scenes` so the
+output lands at `scenes/{segment_id}_render/…` — the composite manifest, QA,
+and the Studio UI all look there and will report the render missing otherwise.
+HTML scenes must implement the deterministic seek
 contract (`window.seek(t)` + `window.__SCENE__`, see docs/collage/CONTRACTS.md).
 
+EVERY segment REQUIRES `visual_engine` ("manim", "html", or "collage") —
+script.json fails validation without it, including "scene" segments (where it
+is unused by the clip path; use "html" there).
 Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip; needs an
 `image_prompt`, or preferably an ordered `visual_beats` list) or "diagram"
 (HTML/Manim). For documentary/explainer segments where designed motion beats AI
@@ -108,9 +264,8 @@ examples in docs/collage/examples/). Prefer `at_word`/`at_frac` TimeRefs over
 absolute seconds; `at_word` refs REQUIRE align to have run first (whisper must be
 installed — there is no estimated fallback). Segments may declare `sfx` cues mixed
 under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",
-"gain_db": -10}]` — sounds are procedurally synthesized (cannon_boom,
-cannon_distant, musket_volley, war_drums, ocean_waves, fire_crackle, wind_howl,
-bell_toll); keep gains subtle (-18..-8 dB); at_word cues need align first.
+"gain_db": -10}]` — sounds are procedurally synthesized (%SFX_SOUNDS%);
+keep gains subtle (-18..-8 dB); at_word cues need align first.
 
 PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
 1. Before generating, write a structured `<run_dir>/script.json` that includes:
@@ -124,8 +279,15 @@ PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
    "action":"...","camera_motion":"slow push-in","continuity_notes":["..."],
    "asset_notes":["..."],"image_prompt":"...","weight":1.0}]. Keep each beat near
    2.5-3.5 seconds; scene segments longer than ~6 seconds usually need 2-4+ beats.
+   Estimate each segment's `estimated_duration_seconds` from its narration word
+   count at ~2.2 words/second (documentary narration pace) — do not guess a
+   round number. A too-short estimate wastes a synthesize+QA cycle discovering
+   the same thing the storyboard tool would have caught for free.
 2. Treat the storyboard as a preproduction gate: run the storyboard tool before
-   imagegen and revise script.json if it warns about too few beats or weak pacing.
+   imagegen and revise script.json if it warns about too few beats, weak
+   pacing, or an implausibly short estimated_duration_seconds for a segment's
+   narration length — fix the estimate there rather than letting synthesize
+   discover it.
 3. Make the style bible concrete. Apply any selected preset style to every
    image_prompt and continuity rule; use correct canonical names and eras.
 4. Prefer robust visuals over fragile AI motion. Avoid asking AI video to render
@@ -136,14 +298,23 @@ PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
    scene beats, write `action` and `camera_motion` so LTX-2.3 brings the still
    image to life instead of merely panning across it.
 5. After videogen run manifest, then composite, then ALWAYS qa. If QA fails,
-   inspect the report (the qa tool returns it), regenerate or revise the failing
-   segments, composite again, and rerun QA. Do not call a video finished unless
+   inspect the report (the qa tool always returns it), regenerate the failing
+   segments WITH force=true (skip-if-exists means a forceless re-run is a
+   no-op), composite again, and rerun QA. QA also cross-checks the final
+   video's duration against the total narration (A/V sync): a drift error
+   means the clips no longer cover the audio — regenerate the affected clips
+   with force and re-composite. Do not call a video finished unless
    QA passes, or you explicitly tell the user what failed and ask for override.
 6. For voice failures, regenerate the affected audio segment first. Audio much
-   longer than the script estimate usually means hallucinated speech.
+   longer than the script estimate usually means either the estimate was too
+   short for the narration's real word count (check the storyboard tool's
+   warnings — fix estimated_duration_seconds and re-synthesize with force) or,
+   if the estimate already looked reasonable, hallucinated speech.
 7. When editing an existing run, preserve good approved artifacts and regenerate
    only the failed or requested segments.
-"""
+""".replace("%STEP_ORDER%", _STEP_ORDER) \
+   .replace("%SFX_SOUNDS%", ", ".join(sorted(_SFX_SOUNDS))) \
+   .replace("%VOICEBOX_URL%", _VOICEBOX_URL)
 
 
 # ---------------------------------------------------------------------------
@@ -193,9 +364,12 @@ async def handle_ws(websocket: WebSocket) -> None:
     active_run_ids_by_conversation: dict[str, str] = {}
     project_ids_by_conversation: dict[str, str] = {}
     active_conversation_id = "default"
-    active_run_id: str | None = None
-    # Queue used to bridge sync hook callbacks → async ws.send_json
-    artifact_queue: asyncio.Queue[tuple[str, str] | None] = asyncio.Queue()
+    # Run ids seen in this turn's tool inputs; the end-of-turn artifact scan
+    # only trusts runs the turn actually touched.
+    seen_run_ids_this_turn: set[str] = set()
+    # The current turn's holder, so the PostToolUse hook can stream artifact
+    # frames through whichever socket currently owns the turn.
+    hook_state: dict[str, Any] = {"holder": None}
     # Once a send fails the socket is gone; stop trying (avoids log spam from
     # a turn task that keeps streaming after the client disconnected).
     conn_state = {"closed": False}
@@ -252,44 +426,34 @@ async def handle_ws(websocket: WebSocket) -> None:
         return
 
     # -----------------------------------------------------------------------
-    # PostToolUse hook – runs synchronously inside the SDK; bridges to async
-    # via artifact_queue.
+    # PostToolUse hook – emits artifact_updated frames through the turn's
+    # holder so a reconnected socket that claimed the turn still gets them.
     # -----------------------------------------------------------------------
     async def _post_tool_use_hook(
         hook_input: PostToolUseHookInput,
         _transcript: str | None,
         _ctx: HookContext,
     ) -> dict[str, Any]:
-        nonlocal active_run_id
         tool_name: str = hook_input.get("tool_name", "")
         if tool_name in _ARTIFACT_TOOLS or tool_name.startswith("mcp__studio__"):
-            # Prefer a run id parsed from the tool input (catches brand-new runs
-            # created mid-conversation); fall back to the viewed run.
+            # Only a run id parsed from the tool input counts — falling back to
+            # the previously-viewed run made run-less tools (one-shot
+            # generate_video, generation_status, plain Bash) snap the viewer
+            # to an unrelated run and mis-bind new chats.
             run_id = _extract_run_id(hook_input.get("tool_input", {}) or {})
             if run_id:
-                active_run_id = run_id
                 active_run_ids_by_conversation[active_conversation_id] = run_id
-            await artifact_queue.put((active_run_id or "unknown", active_conversation_id))
+                seen_run_ids_this_turn.add(run_id)
+                holder = hook_state.get("holder")
+                if holder is not None:
+                    await holder["send"](
+                        {
+                            "type": "artifact_updated",
+                            "run_id": run_id,
+                            "conversation_id": active_conversation_id,
+                        }
+                    )
         return {}
-
-    # -----------------------------------------------------------------------
-    # Background task: drain artifact_queue → ws send_json
-    # -----------------------------------------------------------------------
-    async def _drain_artifacts() -> None:
-        while True:
-            item = await artifact_queue.get()
-            if item is None:
-                break
-            run_id, conversation_id = item
-            await _send(
-                {
-                    "type": "artifact_updated",
-                    "run_id": run_id,
-                    "conversation_id": conversation_id,
-                }
-            )
-
-    drain_task = asyncio.create_task(_drain_artifacts())
 
     # In-process MCP server exposing the typed studio tools (stateless; one
     # instance per connection is fine).
@@ -308,7 +472,11 @@ async def handle_ws(websocket: WebSocket) -> None:
         options: Any,
         holder: dict[str, Any],
     ) -> None:
-        nonlocal active_run_id
+        async def _emit(msg: dict[str, Any]) -> None:
+            # Route through the holder so a reconnected socket that claimed
+            # this turn receives the rest of the stream.
+            await holder["send"](msg)
+
         runs_before_query = _snapshot_run_scripts()
         tool_names_by_id: dict[str, str] = {}
         assistant_chunks: list[str] = []
@@ -338,7 +506,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                                 )
                             except Exception:  # noqa: BLE001
                                 logger.exception("failed to persist conversation session")
-                        await _send(
+                        await _emit(
                             {
                                 "type": "session",
                                 "session_id": new_sid,
@@ -357,7 +525,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                             text = delta.get("text", "")
                             if text:
                                 assistant_chunks.append(text)
-                                await _send(
+                                await _emit(
                                     {
                                         "type": "assistant_text",
                                         "text": text,
@@ -373,7 +541,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                         conversation_id
                     ):
                         session_ids_by_conversation[conversation_id] = event.session_id
-                        await _send(
+                        await _emit(
                             {
                                 "type": "session",
                                 "session_id": event.session_id,
@@ -396,7 +564,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                                     "summary": summary,
                                 },
                             )
-                            await _send(
+                            await _emit(
                                 {
                                     "type": "tool_use",
                                     "id": block.id,
@@ -430,7 +598,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                             if "error" in frame:
                                 transcript_event["error"] = frame["error"]
                             transcripts.append_event(conversation_id, transcript_event)
-                            await _send(frame)
+                            await _emit(frame)
 
                 # ---- ResultMessage: query finished ----
                 elif isinstance(event, ResultMessage):
@@ -438,7 +606,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                         conversation_id
                     ):
                         session_ids_by_conversation[conversation_id] = event.session_id
-                        await _send(
+                        await _emit(
                             {
                                 "type": "session",
                                 "session_id": event.session_id,
@@ -452,7 +620,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                         transcripts.append_event(
                             conversation_id, {"type": "error", "message": message}
                         )
-                        await _send(
+                        await _emit(
                             {
                                 "type": "error",
                                 "message": message,
@@ -466,7 +634,7 @@ async def handle_ws(websocket: WebSocket) -> None:
             transcripts.append_event(
                 conversation_id, {"type": "error", "message": str(exc)}
             )
-            await _send(
+            await _emit(
                 {
                     "type": "error",
                     "message": str(exc),
@@ -490,15 +658,14 @@ async def handle_ws(websocket: WebSocket) -> None:
             return
 
         runs_after_query = _snapshot_run_scripts()
-        changed_runs = [
-            (run_id, mtime)
-            for run_id, mtime in runs_after_query.items()
-            if mtime > runs_before_query.get(run_id, 0)
-        ]
+        # Only runs this turn actually touched may steer the viewer; anything
+        # else that changed concurrently (terminal work, another tab) is
+        # ignored rather than hijacking the selection.
+        changed_runs = _select_changed_runs(
+            runs_before_query, runs_after_query, seen_run_ids_this_turn
+        )
         if changed_runs:
-            changed_runs.sort(key=lambda item: item[1], reverse=True)
             changed_run_id = changed_runs[0][0]
-            active_run_id = changed_run_id
             active_run_ids_by_conversation[conversation_id] = changed_run_id
             # Runs created/touched by this chat belong to the chat's project.
             convo_project = project_ids_by_conversation.get(conversation_id)
@@ -511,7 +678,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                             projects_store.assign_run(new_run_id, convo_project)
                 except Exception:  # noqa: BLE001
                     logger.exception("failed to assign run to project")
-            await _send(
+            await _emit(
                 {
                     "type": "artifact_updated",
                     "run_id": changed_run_id,
@@ -519,7 +686,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                 }
             )
 
-        await _send(
+        await _emit(
             {
                 "type": "done",
                 "conversation_id": conversation_id,
@@ -560,6 +727,38 @@ async def handle_ws(websocket: WebSocket) -> None:
                             logger.warning("interrupt failed: %s", exc)
                 continue
 
+            if msg_type == "resume":
+                # A reconnecting client asks to reclaim a turn that kept
+                # running after its previous socket dropped.
+                convo_id = str(msg.get("conversation_id") or "")
+                detached = _DETACHED_TURNS.get(convo_id)
+                if detached is not None and not detached["task"].done() and not turn_running:
+                    _DETACHED_TURNS.pop(convo_id, None)
+                    watchdog = detached.get("watchdog")
+                    if watchdog is not None:
+                        watchdog.cancel()
+                    # Re-route the turn's stream to this socket.
+                    detached["holder"]["send"] = _send
+                    current_turn = {
+                        "task": detached["task"],
+                        "holder": detached["holder"],
+                        "conversation_id": convo_id,
+                    }
+                    await _send({"type": "resumed", "conversation_id": convo_id})
+                else:
+                    # Nothing to reclaim — the turn already finished (or was
+                    # never detached). Tell the client so it can settle from
+                    # the server transcript.
+                    await _send(
+                        {
+                            "type": "done",
+                            "conversation_id": convo_id,
+                            "run_id": None,
+                            "stopped": False,
+                        }
+                    )
+                continue
+
             if msg_type != "user_message":
                 continue
 
@@ -574,6 +773,12 @@ async def handle_ws(websocket: WebSocket) -> None:
                 )
                 continue
 
+            # A detached turn (from a dropped socket) may still be running on
+            # this conversation; the user's new message supersedes it.
+            detached = _DETACHED_TURNS.pop(conversation_id, None)
+            if detached is not None and not detached["task"].done():
+                await _interrupt_detached_turn(detached)
+
             active_conversation_id = conversation_id
             user_text: str = msg.get("text", "")
             # Persist the user's original text before project/preset context is
@@ -585,7 +790,6 @@ async def handle_ws(websocket: WebSocket) -> None:
             msg_run_id = msg.get("run_id")
             if isinstance(msg_run_id, str) and msg_run_id:
                 active_run_ids_by_conversation[conversation_id] = msg_run_id
-            active_run_id = active_run_ids_by_conversation.get(conversation_id)
 
             # Track the conversation's project and inject project context so
             # every chat in a project shares awareness of its videos.
@@ -675,14 +879,57 @@ async def handle_ws(websocket: WebSocket) -> None:
                         f"call mcp__studio__synthesize with speaker='{preset.get('voice_speaker', 'serena')}' "
                         f"and language='{preset.get('voice_language', 'english')}'. "
                     )
+                if preset.get("qwen_model_size"):
+                    voice_lines += (
+                        f"Pass qwen_model_size='{preset['qwen_model_size']}' to synthesize. "
+                    )
+
+                # Generation-quality overrides: only present when the user has
+                # explicitly customized them (Customize modal), so absence means
+                # "use the tool's own defaults" — never invent values here.
+                gen_params: list[str] = []
+                if preset.get("image_model"):
+                    gen_params.append(f"model='{preset['image_model']}'")
+                if preset.get("image_steps") is not None:
+                    gen_params.append(f"steps={preset['image_steps']}")
+                if preset.get("image_quantize") is not None:
+                    gen_params.append(f"quantize={preset['image_quantize']}")
+                generation_lines = ""
+                if gen_params:
+                    generation_lines += (
+                        f"- Image generation: call imagegen with {', '.join(gen_params)}.\n"
+                    )
+                ltx_params: list[str] = []
+                if preset.get("ltx_steps") is not None:
+                    ltx_params.append(f"steps={preset['ltx_steps']}")
+                if preset.get("ltx_resolution"):
+                    ltx_params.append(f"resolution='{preset['ltx_resolution']}'")
+                if preset.get("ltx_clip_seconds") is not None:
+                    ltx_params.append(f"clip_seconds={preset['ltx_clip_seconds']}")
+                if preset.get("ltx_cfg_scale") is not None:
+                    ltx_params.append(f"cfg_scale={preset['ltx_cfg_scale']}")
+                if preset.get("ltx_stg_scale") is not None:
+                    ltx_params.append(f"stg_scale={preset['ltx_stg_scale']}")
+                if preset.get("ltx_prefer_extend") is not None:
+                    ltx_params.append(f"prefer_extend={preset['ltx_prefer_extend']}")
+                if preset.get("video_fallback_to_kenburns") is not None:
+                    ltx_params.append(f"fallback_to_kenburns={preset['video_fallback_to_kenburns']}")
+                if preset.get("kenburns_zoom") is not None:
+                    ltx_params.append(f"kenburns_zoom={preset['kenburns_zoom']}")
+                if ltx_params:
+                    generation_lines += (
+                        f"- Video motion tuning: call videogen with {', '.join(ltx_params)}.\n"
+                    )
+
                 preset_ctx = (
                     f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
                     f"- Image style: {preset.get('style_prompt', '')}\n"
                     f"- Narration style: {preset.get('narration_style', '')}\n"
                     f"- Target length: {preset.get('video_length_minutes', '?')} minutes\n"
                     f"- Voice: speaker={preset.get('voice_speaker', 'serena')}, language={preset.get('voice_language', 'english')}\n"
-                    f"- Video motion: {preset.get('video_provider', 'kenburns')}\n"
+                    f"- Video motion: {preset.get('video_provider', 'ltx')}\n"
                     f"{collage_lines}"
+                    f"{generation_lines}"
                     f"IMPORTANT: Use these settings when generating the video. "
                     f"Call the videogen tool with video_provider='ltx' so LTX-2.3 animates the storyboard action; use Ken Burns only if explicitly requested or as fallback. "
                     f"Put the image style and narration style into script.json as style_bible and narration_style. "
@@ -705,7 +952,14 @@ async def handle_ws(websocket: WebSocket) -> None:
                     "preset": "claude_code",
                     "append": _STUDIO_BRIEF + "\n" + capabilities.summary_line(),
                 },
-                permission_mode="acceptEdits",
+                # bypassPermissions: this app has no interactive prompt UI for the
+                # agent's own tool calls, so any tool not pre-approved would hang
+                # forever waiting on a permission nobody can grant (this is what
+                # broke WebSearch above). allowed_tools is kept as documentation
+                # of the expected tool surface, but bypassPermissions is what
+                # actually lets every one of them (and any future built-in tool)
+                # run without getting stuck.
+                permission_mode="bypassPermissions",
                 mcp_servers={"studio": studio_server},
                 allowed_tools=[
                     "Read",
@@ -716,6 +970,10 @@ async def handle_ws(websocket: WebSocket) -> None:
                     "Grep",
                     "Task",
                     "Skill",
+                    "WebSearch",
+                    "WebFetch",
+                    "NotebookEdit",
+                    "TodoWrite",
                     *studio_tool_names,
                 ],
                 setting_sources=["project"],
@@ -730,7 +988,9 @@ async def handle_ws(websocket: WebSocket) -> None:
                 },
             )
 
-            holder: dict[str, Any] = {"client": None, "stopped": False}
+            seen_run_ids_this_turn.clear()
+            holder: dict[str, Any] = {"client": None, "stopped": False, "send": _send}
+            hook_state["holder"] = holder
             task = asyncio.create_task(
                 _run_turn(conversation_id, user_text, options, holder)
             )
@@ -752,27 +1012,14 @@ async def handle_ws(websocket: WebSocket) -> None:
             }
         )
     finally:
-        # Tear down any in-flight turn so no CLI subprocess is orphaned.
+        conn_state["closed"] = True
+        # Don't kill an in-flight turn just because the socket dropped — it
+        # already streams into the server transcript and a chat-driven
+        # production would die half-finished. Detach it instead: a
+        # reconnecting client can claim it, and the watchdog interrupts it
+        # after a grace window so no CLI subprocess runs unattended forever.
         if current_turn is not None and not current_turn["task"].done():
-            conn_state["closed"] = True
-            turn_client = current_turn["holder"].get("client")
-            if turn_client is not None:
-                try:
-                    await turn_client.interrupt()
-                except Exception as exc:  # noqa: BLE001
-                    logger.warning("interrupt on disconnect failed: %s", exc)
-            try:
-                await asyncio.wait_for(current_turn["task"], timeout=15)
-            except Exception:  # noqa: BLE001
-                current_turn["task"].cancel()
-                try:
-                    await current_turn["task"]
-                except (Exception, asyncio.CancelledError):  # noqa: BLE001
-                    pass
-        # Signal the drain task to stop
-        await artifact_queue.put(None)
-        drain_task.cancel()
-        try:
-            await drain_task
-        except asyncio.CancelledError:
-            pass
+            _detach_turn(
+                current_turn["conversation_id"],
+                {"task": current_turn["task"], "holder": current_turn["holder"]},
+            )

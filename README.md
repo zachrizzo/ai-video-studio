@@ -68,8 +68,8 @@ Backend environment variables (all optional):
 - `STUDIO_GENERATIONS_DIR` — where one-shot generations (Generate tab, chat
   quick clips) are stored (default `$STUDIO_HOME/generations`).
 - `STUDIO_PRESETS_FILE` — custom presets JSON (default `$STUDIO_HOME/presets.json`).
-- `STUDIO_AGENT_MODEL` — model override for the chat agent (default: the
-  Claude Agent SDK's default model).
+- `STUDIO_AGENT_MODEL` — model for the chat agent (default: `claude-sonnet-5`,
+  set to override).
 - `STUDIO_RUNS_DIR` — where video runs live and what `/media` serves
   (default `/tmp/mongol-video`).
 

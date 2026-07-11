@@ -4,7 +4,7 @@ import { FlowViewer } from './components/FlowViewer'
 import { GeneratePanel } from './components/GeneratePanel'
 import { PresetBar } from './components/PresetBar'
 import { ProjectBar } from './components/ProjectBar'
-import type { Project } from './api'
+import type { Preset, Project } from './api'
 
 type Tab = 'story' | 'generate'
 
@@ -19,10 +19,9 @@ function LogoIcon() {
 export default function App() {
   const [activeTab, setActiveTab] = useState<Tab>('story')
   const [currentRunId, setCurrentRunId] = useState<string | null>(null)
-  const [currentRunTitle, setCurrentRunTitle] = useState<string | null>(null)
   const [artifactRefreshRunId, setArtifactRefreshRunId] = useState<string | null>(null)
   const [connected, setConnected] = useState(false)
-  const [activePreset, setActivePreset] = useState<any>(null)
+  const [activePreset, setActivePreset] = useState<Preset | null>(null)
   const [currentProject, setCurrentProject] = useState<Project | null>(null)
   const [projectRefreshToken, setProjectRefreshToken] = useState(0)
 
@@ -33,9 +32,15 @@ export default function App() {
     setProjectRefreshToken(t => t + 1)
   }, [])
 
-  const handleRunChange = useCallback((runId: string, title?: string) => {
+  // Point the viewer at a run without implying new artifacts (used when the
+  // user switches to a conversation bound to a different run).
+  const handleRunSelected = useCallback((runId: string) => {
+    setArtifactRefreshRunId(null)
+    requestAnimationFrame(() => setArtifactRefreshRunId(runId))
+  }, [])
+
+  const handleRunChange = useCallback((runId: string) => {
     setCurrentRunId(runId)
-    setCurrentRunTitle(title || null)
   }, [])
 
   const handleProjectChange = useCallback((project: Project | null) => {
@@ -78,9 +83,10 @@ export default function App() {
         <div className="panels">
           <ChatPanel
             currentRunId={currentRunId}
-            currentRunTitle={currentRunTitle}
             currentProjectId={currentProject?.id ?? null}
+            serverConversations={currentProject?.conversations ?? null}
             onArtifactUpdated={handleArtifactUpdated}
+            onRunSelected={handleRunSelected}
             onConnectionChange={setConnected}
             activePreset={activePreset}
           />

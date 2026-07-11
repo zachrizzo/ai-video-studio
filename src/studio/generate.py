@@ -18,6 +18,11 @@ from pathlib import Path
 from src.config import PipelineConfig
 from src.studio import config
 
+# Same cross-process lock the pipeline takes around FLUX/LTX work: a chat
+# "make me an image" must never run concurrently with a production run's
+# generation on the same MPS device.
+from src.utils.locks import generation_lock
+
 logger = logging.getLogger(__name__)
 
 
@@ -120,6 +125,21 @@ def _new_gen(gen_type: str) -> tuple[str, Path]:
     return gen_id, out_dir
 
 
+def _write_initial_status(gen_id: str, gen_type: str, prompt: str | None = None) -> None:
+    """Write status.json BEFORE the worker thread spawns.
+
+    A generation_status poll issued right after start_* must find the gen_id;
+    "generation not found" here made agents retry and duplicate heavy
+    generations. The worker thread overwrites this with real progress.
+    """
+    _write_status(gen_id, {
+        "id": gen_id, "type": gen_type, "status": "generating",
+        "prompt": prompt, "created_at": time.time(),
+        "output_url": None, "error": None,
+        "progress": 0, "progress_step": "Queued",
+    })
+
+
 def _save_upload(src_path: str | None, out_dir: Path, name: str) -> Path | None:
     """Copy an uploaded file into the generation directory."""
     if not src_path:
@@ -140,17 +160,22 @@ def _cfg() -> PipelineConfig:
 
 
 def _run_ltx_mlx(cmd_args: list[str], models_dir: str = "") -> dict:
-    """Run an ltx-2-mlx CLI command as a subprocess. Returns {success, error}."""
+    """Run an ltx-2-mlx CLI command as a subprocess. Returns {success, error}.
+
+    Holds the cross-process generation lock for the whole run: ltx-2-mlx is
+    heavy MPS work, exactly like the pipeline's FLUX/LTX generations.
+    """
     import subprocess as sp
     env = dict(__import__("os").environ)
     if models_dir:
         env["HF_HUB_CACHE"] = str(Path(models_dir).expanduser())
     try:
-        proc = sp.run(
-            ["uv", "run", "ltx-2-mlx"] + cmd_args,
-            capture_output=True, text=True, timeout=3600,
-            cwd=str(_LTX_MLX_DIR), env=env,
-        )
+        with generation_lock():
+            proc = sp.run(
+                ["uv", "run", "ltx-2-mlx"] + cmd_args,
+                capture_output=True, text=True, timeout=3600,
+                cwd=str(_LTX_MLX_DIR), env=env,
+            )
         if proc.returncode != 0:
             tail = (proc.stderr or proc.stdout or "")[-500:]
             return {"success": False, "error": f"ltx-2-mlx exited {proc.returncode}: {tail}"}
@@ -183,15 +208,16 @@ def _run_image_gen(gen_id: str, prompt: str, cfg: PipelineConfig) -> None:
         out_file = out_dir / "output.png"
 
         from src.imagegen.flux import generate_image
-        result = generate_image(
-            prompt=prompt,
-            output_path=out_file,
-            model=cfg.image_model,
-            steps=cfg.image_steps,
-            quantize=cfg.image_quantize,
-            models_dir=cfg.models_dir,
-            timeout=cfg.image_timeout_seconds,
-        )
+        with generation_lock():
+            result = generate_image(
+                prompt=prompt,
+                output_path=out_file,
+                model=cfg.image_model,
+                steps=cfg.image_steps,
+                quantize=cfg.image_quantize,
+                models_dir=cfg.models_dir,
+                timeout=cfg.image_timeout_seconds,
+            )
         if result.success:
             _write_status(gen_id, {
                 "id": gen_id, "type": "image", "status": "done",
@@ -235,15 +261,16 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
         if src_image is None or not src_image.exists():
             src_image = out_dir / "input.png"
             from src.imagegen.flux import generate_image
-            img_result = generate_image(
-                prompt=prompt,
-                output_path=src_image,
-                model=cfg.image_model,
-                steps=cfg.image_steps,
-                quantize=cfg.image_quantize,
-                models_dir=cfg.models_dir,
-                timeout=cfg.image_timeout_seconds,
-            )
+            with generation_lock():
+                img_result = generate_image(
+                    prompt=prompt,
+                    output_path=src_image,
+                    model=cfg.image_model,
+                    steps=cfg.image_steps,
+                    quantize=cfg.image_quantize,
+                    models_dir=cfg.models_dir,
+                    timeout=cfg.image_timeout_seconds,
+                )
             if not img_result.success:
                 _write_status(gen_id, {
                     "id": gen_id, "type": "video", "status": "failed",
@@ -262,25 +289,26 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
         })
 
         from src.videogen.ltx import generate_ltx_clip
-        result = generate_ltx_clip(
-            image_path=src_image,
-            output_path=out_video,
-            duration_seconds=cfg.ltx_clip_seconds,
-            prompt=prompt,
-            resolution=cfg.resolution,
-            fps=cfg.frame_rate,
-            model_id=cfg.ltx_model,
-            steps=cfg.ltx_steps,
-            gen_width=cfg.ltx_gen_width,
-            gen_height=cfg.ltx_gen_height,
-            clip_seconds=cfg.ltx_clip_seconds,
-            models_dir=cfg.models_dir,
-            prefer_extend=cfg.ltx_prefer_extend,
-            max_frames=cfg.ltx_max_frames,
-            anchor_last_frame=cfg.ltx_anchor_last_frame,
-            cfg_scale=cfg.ltx_cfg_scale,
-            stg_scale=cfg.ltx_stg_scale,
-        )
+        with generation_lock():
+            result = generate_ltx_clip(
+                image_path=src_image,
+                output_path=out_video,
+                duration_seconds=cfg.ltx_clip_seconds,
+                prompt=prompt,
+                resolution=cfg.resolution,
+                fps=cfg.frame_rate,
+                model_id=cfg.ltx_model,
+                steps=cfg.ltx_steps,
+                gen_width=cfg.ltx_gen_width,
+                gen_height=cfg.ltx_gen_height,
+                clip_seconds=cfg.ltx_clip_seconds,
+                models_dir=cfg.models_dir,
+                prefer_extend=cfg.ltx_prefer_extend,
+                max_frames=cfg.ltx_max_frames,
+                anchor_last_frame=cfg.ltx_anchor_last_frame,
+                cfg_scale=cfg.ltx_cfg_scale,
+                stg_scale=cfg.ltx_stg_scale,
+            )
         if result.get("success"):
             _write_status(gen_id, {
                 "id": gen_id, "type": "video", "status": "done",
@@ -308,6 +336,7 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
 def start_image_generation(prompt: str) -> str:
     gen_id = uuid.uuid4().hex[:12]
     cfg = PipelineConfig()
+    _write_initial_status(gen_id, "image", prompt)
     t = threading.Thread(target=_run_image_gen, args=(gen_id, prompt, cfg), daemon=True)
     t.start()
     return gen_id
@@ -316,6 +345,7 @@ def start_image_generation(prompt: str) -> str:
 def start_video_generation(prompt: str, image_path: str | None = None) -> str:
     gen_id = uuid.uuid4().hex[:12]
     cfg = PipelineConfig()
+    _write_initial_status(gen_id, "video", prompt)
     t = threading.Thread(target=_run_video_gen, args=(gen_id, prompt, image_path, cfg), daemon=True)
     t.start()
     return gen_id
@@ -364,12 +394,13 @@ def _run_text_to_video(gen_id: str, prompt: str, backend: str,
             })
 
             from src.imagegen.flux import generate_image
-            img_result = generate_image(
-                prompt=prompt, output_path=src_image,
-                model=cfg.image_model, steps=cfg.image_steps,
-                quantize=cfg.image_quantize, models_dir=cfg.models_dir,
-                timeout=cfg.image_timeout_seconds,
-            )
+            with generation_lock():
+                img_result = generate_image(
+                    prompt=prompt, output_path=src_image,
+                    model=cfg.image_model, steps=cfg.image_steps,
+                    quantize=cfg.image_quantize, models_dir=cfg.models_dir,
+                    timeout=cfg.image_timeout_seconds,
+                )
             if not img_result.success:
                 _write_status(gen_id, {
                     "id": gen_id, "type": "text-to-video", "status": "failed",
@@ -396,19 +427,20 @@ def _run_text_to_video(gen_id: str, prompt: str, backend: str,
                 "progress": 55, "progress_step": "Generating video frames...",
             })
 
-            result = generate_ltx_clip(
-                image_path=src_image, output_path=out_file,
-                duration_seconds=duration or cfg.ltx_clip_seconds,
-                prompt=prompt, resolution=cfg.resolution, fps=fps or cfg.frame_rate,
-                model_id=cfg.ltx_model, steps=cfg.ltx_steps,
-                gen_width=cfg.ltx_gen_width, gen_height=cfg.ltx_gen_height,
-                clip_seconds=cfg.ltx_clip_seconds, models_dir=cfg.models_dir,
-                prefer_extend=cfg.ltx_prefer_extend,
-                max_frames=cfg.ltx_max_frames,
-                anchor_last_frame=cfg.ltx_anchor_last_frame,
-                cfg_scale=cfg.ltx_cfg_scale,
-                stg_scale=cfg.ltx_stg_scale,
-            )
+            with generation_lock():
+                result = generate_ltx_clip(
+                    image_path=src_image, output_path=out_file,
+                    duration_seconds=duration or cfg.ltx_clip_seconds,
+                    prompt=prompt, resolution=cfg.resolution, fps=fps or cfg.frame_rate,
+                    model_id=cfg.ltx_model, steps=cfg.ltx_steps,
+                    gen_width=cfg.ltx_gen_width, gen_height=cfg.ltx_gen_height,
+                    clip_seconds=cfg.ltx_clip_seconds, models_dir=cfg.models_dir,
+                    prefer_extend=cfg.ltx_prefer_extend,
+                    max_frames=cfg.ltx_max_frames,
+                    anchor_last_frame=cfg.ltx_anchor_last_frame,
+                    cfg_scale=cfg.ltx_cfg_scale,
+                    stg_scale=cfg.ltx_stg_scale,
+                )
             result = {"success": result.get("success", False), "output_path": str(out_file),
                        "error": result.get("error_message")}
 
@@ -485,20 +517,21 @@ def _run_image_to_video(gen_id: str, image_path: str, prompt: str | None,
                 "output_url": None, "error": None,
                 "progress": 50, "progress_step": "Generating video frames...",
             })
-            lr = generate_ltx_clip(
-                image_path=src, output_path=out_file,
-                duration_seconds=duration or cfg.ltx_clip_seconds,
-                prompt=prompt or "", resolution=cfg.resolution,
-                fps=fps or cfg.frame_rate, model_id=cfg.ltx_model,
-                steps=cfg.ltx_steps, gen_width=cfg.ltx_gen_width,
-                gen_height=cfg.ltx_gen_height, clip_seconds=cfg.ltx_clip_seconds,
-                models_dir=cfg.models_dir,
-                prefer_extend=cfg.ltx_prefer_extend,
-                max_frames=cfg.ltx_max_frames,
-                anchor_last_frame=cfg.ltx_anchor_last_frame,
-                cfg_scale=cfg.ltx_cfg_scale,
-                stg_scale=cfg.ltx_stg_scale,
-            )
+            with generation_lock():
+                lr = generate_ltx_clip(
+                    image_path=src, output_path=out_file,
+                    duration_seconds=duration or cfg.ltx_clip_seconds,
+                    prompt=prompt or "", resolution=cfg.resolution,
+                    fps=fps or cfg.frame_rate, model_id=cfg.ltx_model,
+                    steps=cfg.ltx_steps, gen_width=cfg.ltx_gen_width,
+                    gen_height=cfg.ltx_gen_height, clip_seconds=cfg.ltx_clip_seconds,
+                    models_dir=cfg.models_dir,
+                    prefer_extend=cfg.ltx_prefer_extend,
+                    max_frames=cfg.ltx_max_frames,
+                    anchor_last_frame=cfg.ltx_anchor_last_frame,
+                    cfg_scale=cfg.ltx_cfg_scale,
+                    stg_scale=cfg.ltx_stg_scale,
+                )
             result = {"success": lr.get("success", False), "output_path": str(out_file),
                        "error": lr.get("error_message")}
 
@@ -756,6 +789,7 @@ def start_text_to_video(
     generate_audio: bool = True,
 ) -> str:
     gen_id, _ = _new_gen("text-to-video")
+    _write_initial_status(gen_id, "text-to-video", prompt)
     t = threading.Thread(
         target=_run_text_to_video,
         args=(gen_id, prompt, backend, model, duration, resolution, fps,
@@ -780,6 +814,7 @@ def start_image_to_video(
     last_frame: bool | None = None,
 ) -> str:
     gen_id, _ = _new_gen("image-to-video")
+    _write_initial_status(gen_id, "image-to-video", prompt)
     t = threading.Thread(
         target=_run_image_to_video,
         args=(gen_id, image_path, prompt, backend, model, duration, resolution,
@@ -800,6 +835,7 @@ def start_audio_to_video(
     backend: str = "local",
 ) -> str:
     gen_id, _ = _new_gen("audio-to-video")
+    _write_initial_status(gen_id, "audio-to-video", prompt)
     t = threading.Thread(
         target=_run_audio_to_video,
         args=(gen_id, audio_uri, image_uri, prompt, model, resolution,
@@ -821,6 +857,7 @@ def start_retake_video(
     backend: str = "local",
 ) -> str:
     gen_id, _ = _new_gen("retake")
+    _write_initial_status(gen_id, "retake", prompt)
     t = threading.Thread(
         target=_run_retake_video,
         args=(gen_id, video_uri, start_time, duration, prompt, model,
@@ -841,6 +878,7 @@ def start_extend_video(
     backend: str = "local",
 ) -> str:
     gen_id, _ = _new_gen("extend")
+    _write_initial_status(gen_id, "extend", prompt)
     t = threading.Thread(
         target=_run_extend_video,
         args=(gen_id, video_uri, prompt, model, mode, duration, context, backend),
@@ -852,6 +890,7 @@ def start_extend_video(
 
 def start_video_hdr(video_uri: str) -> str:
     gen_id, _ = _new_gen("video-hdr")
+    _write_initial_status(gen_id, "video-hdr")
     t = threading.Thread(
         target=_run_video_hdr,
         args=(gen_id, video_uri),
@@ -935,6 +974,7 @@ def start_tts(
     voicebox_profile: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("text-to-speech")
+    _write_initial_status(gen_id, "text-to-speech", text)
     t = threading.Thread(
         target=_run_tts,
         args=(gen_id, text, speaker, language, instruct, ref_audio,

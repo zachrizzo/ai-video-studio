@@ -14,6 +14,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Fast-paced, witty, sarcastic humor. Short punchy sentences. Use modern slang to describe historical events. Make jokes.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Narrator",
     },
     "cinematic_documentary": {
         "name": "Cinematic Documentary",
@@ -24,6 +26,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Deep, authoritative documentary narrator voice. Formal but engaging. Build tension and drama. Like David Attenborough meets Ken Burns.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Eric",
     },
     "educational_explainer": {
         "name": "Educational Explainer",
@@ -34,6 +38,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Friendly, clear teacher voice. Break complex topics into simple parts. Use analogies. Pause for emphasis on key points.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Narrator",
     },
     "anime_style": {
         "name": "Anime Style",
@@ -44,6 +50,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Energetic and dramatic. Use exclamations. Build hype. Describe action scenes vividly.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Narrator",
     },
     "anthropic_documentary": {
         "name": "Anthropic Documentary",
@@ -55,7 +63,7 @@ DEFAULT_PRESETS = {
         "video_provider": "ltx",
         "narration_style": "Calm, thoughtful documentary narrator. Measured pacing with deliberate pauses. Curious and precise, like a nature documentary about a mind.",
         "tts_provider": "voicebox",
-        "voicebox_profile": "Narrator",
+        "voicebox_profile": "Eric",
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
         "sfx_style": (
@@ -92,6 +100,8 @@ DEFAULT_PRESETS = {
         "voice_language": "english",
         "video_provider": "ltx",
         "narration_style": "Slow, ominous whisper. Build dread. Use pauses. Describe sounds and sensations. Creepy atmosphere.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Narrator",
     },
 }
 

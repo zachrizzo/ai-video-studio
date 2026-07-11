@@ -117,6 +117,26 @@ def _normalize_audio_file(path: Path, target_lufs: float = -16.0) -> str | None:
             tmp_path.unlink(missing_ok=True)
 
 
+def _reusable_take(entry) -> bool:
+    """True when an existing audio manifest entry is a good, reusable take:
+    it succeeded, carries no qa_issues, and its normalized wav is still on disk.
+    """
+    if not isinstance(entry, dict) or entry.get("failed") or entry.get("silent"):
+        return False
+    # Only entries written by a real synthesis pass carry a qa_issues list;
+    # cmd_silence placeholders (and hand-written entries) lack it and must
+    # never be reused as narration.
+    if entry.get("qa_issues") != []:
+        return False
+    if float(entry.get("duration_seconds") or 0) <= 0:
+        return False
+    audio_path = entry.get("audio_path")
+    if not audio_path:
+        return False
+    path = Path(audio_path)
+    return path.exists() and path.stat().st_size > 0
+
+
 def cmd_synthesize(script_json: str, output_dir: str):
     """Synthesize voice audio for all segments in a script.
 
@@ -125,7 +145,18 @@ def cmd_synthesize(script_json: str, output_dir: str):
     (bundled Qwen3-TTS, local), or "elevenlabs" (cloud). As a legacy
     convenience, an empty ElevenLabs key falls back to Qwen — but only when
     ElevenLabs was the chosen provider; "voicebox" never silently falls back.
+
+    Segments that already have a good take in audio_manifest.json (no
+    qa_issues, wav on disk) are SKIPPED unless PTV_AUDIO_FORCE=1, so re-runs
+    never re-roll approved narration out from under already-generated clips.
+    The effective voice settings persist in the manifest under "_voice" and are
+    reused on resume unless explicitly overridden via env, so a resumed run
+    never switches voices. Exits 2 when any segment fails or still carries
+    qa_issues after its retry; failed segments get duration_seconds 0 and
+    "failed": true instead of a fake estimated duration.
     """
+    import os
+
     from .analysis.script_writer import load_script
     from .config import PipelineConfig
 
@@ -134,152 +165,85 @@ def cmd_synthesize(script_json: str, output_dir: str):
     out = Path(output_dir)
     out.mkdir(parents=True, exist_ok=True)
 
-    provider = config.voice_provider
+    manifest_path = out / "audio_manifest.json"
+    existing: dict = {}
+    if manifest_path.exists():
+        try:
+            existing = json.loads(manifest_path.read_text())
+        except json.JSONDecodeError:
+            existing = {}
+        if not isinstance(existing, dict):
+            existing = {}
+    persisted_voice = existing.get("_voice")
+    if not isinstance(persisted_voice, dict):
+        persisted_voice = {}
+
+    def voice_setting(env_key: str, persisted_key: str, config_value):
+        # An env var set for THIS invocation is an explicit override (pydantic
+        # already folded it into config_value); otherwise the voice persisted
+        # in the manifest wins so resumes never switch voices mid-run.
+        if os.environ.get(env_key):
+            return config_value
+        return persisted_voice.get(persisted_key) or config_value
+
+    provider = voice_setting("PTV_VOICE_PROVIDER", "provider", config.voice_provider)
     if provider == "elevenlabs" and not config.elevenlabs_api_key:
         provider = "qwen"
 
     if provider == "voicebox":
-        console.print(f"[blue]Using Voicebox ({config.voicebox_profile}) for voice synthesis[/blue]")
+        profile = voice_setting("PTV_VOICEBOX_PROFILE", "profile", config.voicebox_profile)
+        language = voice_setting("PTV_VOICEBOX_LANGUAGE", "language", config.voicebox_language)
+        voice_meta = {"provider": "voicebox", "profile": profile, "language": language}
+        console.print(f"[blue]Using Voicebox ({profile}) for voice synthesis[/blue]")
         from .studio.tts_voicebox import generate_speech_voicebox, resolve_profile
 
         # Resolve the profile ONCE, before the loop. A miss (or a down server)
         # is a hard failure with an actionable error — no fallback provider.
         try:
-            profile_id = resolve_profile(config.voicebox_url, config.voicebox_profile)
+            profile_id = resolve_profile(config.voicebox_url, profile)
         except RuntimeError as exc:
             console.print(f"[red]Voicebox unavailable: {exc}[/red]")
             sys.exit(1)
 
-        manifest = {}
-        for seg in script.segments:
-            audio_path = out / f"audio_{seg.segment_id}.wav"
-            console.print(f"  {seg.segment_id}: {seg.narration_text[:60]}…")
-            qa_issues: list[str] = []
-            result = {"success": False, "error": "not attempted"}
-            duration = seg.estimated_duration_seconds
-            # Qwen re-rolls a drifting take with a stricter instruction; Voicebox
-            # has no instruct knob, so re-roll the sampler seed instead. The first
-            # take is server-chosen (seed=None); the retry pins a deterministic seed.
-            first_seed = 0
-            for attempt, seed in enumerate((None, first_seed + 1), start=1):
-                qa_issues = []
-                result = generate_speech_voicebox(
-                    text=seg.narration_text,
-                    output_path=audio_path,
-                    profile=profile_id,
-                    language=config.voicebox_language,
-                    seed=seed,
-                    url=config.voicebox_url,
-                )
-                if not result["success"]:
-                    break
+        # Qwen re-rolls a drifting take with a stricter instruction; Voicebox
+        # has no instruct knob, so re-roll the sampler seed instead. The first
+        # take is server-chosen (seed=None); the retry pins a deterministic seed.
+        attempts = (None, 1)
+        retry_note = "retrying with a fresh Voicebox seed"
 
-                norm_error = _normalize_audio_file(audio_path, config.qa_target_lufs)
-                if norm_error:
-                    qa_issues.append(norm_error)
-
-                probed = _probe_media_duration(audio_path)
-                duration = probed if probed is not None else seg.estimated_duration_seconds
-                drift = _duration_drift_issue(
-                    duration,
-                    seg.estimated_duration_seconds,
-                    config,
-                )
-                if drift and attempt == 1:
-                    console.print(f"    [yellow]{drift}; retrying with a fresh Voicebox seed[/yellow]")
-                    continue
-                if drift:
-                    qa_issues.append(drift)
-                break
-
-            if result["success"]:
-                manifest[seg.segment_id] = {
-                    "audio_path": str(audio_path),
-                    "duration_seconds": duration,
-                    "qa_issues": qa_issues,
-                }
-                issue_note = " [yellow](QA issue)[/yellow]" if qa_issues else ""
-                console.print(f"    [green]-> {audio_path.name} ({duration:.1f}s)[/green]{issue_note}")
-            else:
-                console.print(f"    [red]FAILED: {result.get('error', '?')}[/red]")
-                manifest[seg.segment_id] = {
-                    "audio_path": str(audio_path),
-                    "duration_seconds": seg.estimated_duration_seconds,
-                    "qa_issues": [result.get("error", "TTS failed")],
-                }
-
-        manifest_path = out / "audio_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-        total = sum(v["duration_seconds"] for v in manifest.values())
-        console.print(f"[green]Synthesized {len(manifest)} segments ({total:.1f}s total) via Voicebox[/green]")
-        console.print(f"  Manifest: {manifest_path}")
+        def take(seg, audio_path, seed):
+            return generate_speech_voicebox(
+                text=seg.narration_text,
+                output_path=audio_path,
+                profile=profile_id,
+                language=language,
+                seed=seed,
+                url=config.voicebox_url,
+            )
 
     elif provider == "qwen":
-        console.print("[blue]Using Qwen3-TTS (local) for voice synthesis[/blue]")
+        speaker = voice_setting("PTV_QWEN_TTS_SPEAKER", "speaker", config.qwen_tts_speaker)
+        language = voice_setting("PTV_QWEN_TTS_LANGUAGE", "language", config.qwen_tts_language)
+        voice_meta = {"provider": "qwen", "speaker": speaker, "language": language}
+        console.print(f"[blue]Using Qwen3-TTS (local, speaker={speaker}) for voice synthesis[/blue]")
         from .studio.tts import generate_speech
-        manifest = {}
-        for seg in script.segments:
-            audio_path = out / f"audio_{seg.segment_id}.wav"
-            console.print(f"  {seg.segment_id}: {seg.narration_text[:60]}…")
-            qa_issues: list[str] = []
-            result = {"success": False, "error": "not attempted"}
-            duration = seg.estimated_duration_seconds
-            retry_instruction = (
-                "Read the text exactly once in clear English. Do not translate, improvise, "
-                "repeat, add words, or continue after the final sentence."
+
+        retry_instruction = (
+            "Read the text exactly once in clear English. Do not translate, improvise, "
+            "repeat, add words, or continue after the final sentence."
+        )
+        attempts = (None, retry_instruction)
+        retry_note = "retrying with stricter TTS instruction"
+
+        def take(seg, audio_path, instruct):
+            return generate_speech(
+                text=seg.narration_text,
+                output_path=audio_path,
+                speaker=speaker,
+                language=language,
+                instruct=instruct,
+                model_size=config.qwen_tts_model_size,
             )
-            for attempt, instruct in enumerate((None, retry_instruction), start=1):
-                qa_issues = []
-                result = generate_speech(
-                    text=seg.narration_text,
-                    output_path=audio_path,
-                    speaker=config.qwen_tts_speaker,
-                    language=config.qwen_tts_language,
-                    instruct=instruct,
-                    model_size=config.qwen_tts_model_size,
-                )
-                if not result["success"]:
-                    break
-
-                norm_error = _normalize_audio_file(audio_path, config.qa_target_lufs)
-                if norm_error:
-                    qa_issues.append(norm_error)
-
-                probed = _probe_media_duration(audio_path)
-                duration = probed if probed is not None else seg.estimated_duration_seconds
-                drift = _duration_drift_issue(
-                    duration,
-                    seg.estimated_duration_seconds,
-                    config,
-                )
-                if drift and attempt == 1:
-                    console.print(f"    [yellow]{drift}; retrying with stricter TTS instruction[/yellow]")
-                    continue
-                if drift:
-                    qa_issues.append(drift)
-                break
-
-            if result["success"]:
-                manifest[seg.segment_id] = {
-                    "audio_path": str(audio_path),
-                    "duration_seconds": duration,
-                    "qa_issues": qa_issues,
-                }
-                issue_note = " [yellow](QA issue)[/yellow]" if qa_issues else ""
-                console.print(f"    [green]-> {audio_path.name} ({duration:.1f}s)[/green]{issue_note}")
-            else:
-                console.print(f"    [red]FAILED: {result.get('error', '?')}[/red]")
-                manifest[seg.segment_id] = {
-                    "audio_path": str(audio_path),
-                    "duration_seconds": seg.estimated_duration_seconds,
-                    "qa_issues": [result.get("error", "TTS failed")],
-                }
-
-        manifest_path = out / "audio_manifest.json"
-        manifest_path.write_text(json.dumps(manifest, indent=2))
-        total = sum(v["duration_seconds"] for v in manifest.values())
-        console.print(f"[green]Synthesized {len(manifest)} segments ({total:.1f}s total) via Qwen3-TTS[/green]")
-        console.print(f"  Manifest: {manifest_path}")
 
     else:
         console.print("[blue]Using ElevenLabs for voice synthesis[/blue]")
@@ -294,6 +258,8 @@ def cmd_synthesize(script_json: str, output_dir: str):
             use_speaker_boost=config.voice_use_speaker_boost,
         )
 
+        # ElevenLabs raises on any API failure, so the process already exits
+        # non-zero; no per-segment retry/skip loop here.
         audio_segments = synth.synthesize_all(script.segments, out)
 
         manifest = {
@@ -303,12 +269,125 @@ def cmd_synthesize(script_json: str, output_dir: str):
             }
             for seg in audio_segments
         }
-        manifest_path = out / "audio_manifest.json"
+        manifest["_voice"] = {
+            "provider": "elevenlabs",
+            "voice_id": config.voice_id,
+            "model": config.elevenlabs_model,
+        }
         manifest_path.write_text(json.dumps(manifest, indent=2))
 
         total = sum(s.duration_seconds for s in audio_segments)
         console.print(f"[green]Synthesized {len(audio_segments)} segments ({total:.1f}s total)[/green]")
         console.print(f"  Manifest: {manifest_path}")
+        print(json.dumps({
+            "synthesized": [s.segment_id for s in audio_segments],
+            "skipped": [], "failed": [], "qa_flagged": [],
+            "voice": manifest["_voice"], "manifest_path": str(manifest_path),
+        }))
+        return
+
+    # An explicit voice change makes every existing take stale: reusing them
+    # would ship a video that switches voices mid-run.
+    voice_changed = bool(persisted_voice) and persisted_voice != voice_meta
+    if voice_changed:
+        console.print(
+            f"[yellow]Voice changed ({persisted_voice} -> {voice_meta}); "
+            f"regenerating all segments[/yellow]"
+        )
+
+    manifest = {}
+    synthesized, skipped, failed, flagged = [], [], [], []
+    for seg in script.segments:
+        audio_path = out / f"audio_{seg.segment_id}.wav"
+        prior = existing.get(seg.segment_id)
+        if not config.audio_force and not voice_changed and _reusable_take(prior):
+            manifest[seg.segment_id] = prior
+            skipped.append(seg.segment_id)
+            console.print(
+                f"  [dim]Skip (good take exists): {seg.segment_id} "
+                f"({float(prior['duration_seconds']):.1f}s)[/dim]"
+            )
+            continue
+
+        console.print(f"  {seg.segment_id}: {seg.narration_text[:60]}…")
+        qa_issues: list[str] = []
+        result = {"success": False, "error": "not attempted"}
+        duration = seg.estimated_duration_seconds
+        for attempt, attempt_param in enumerate(attempts, start=1):
+            qa_issues = []
+            result = take(seg, audio_path, attempt_param)
+            if not result["success"]:
+                break
+
+            norm_error = _normalize_audio_file(audio_path, config.qa_target_lufs)
+            if norm_error:
+                qa_issues.append(norm_error)
+
+            probed = _probe_media_duration(audio_path)
+            duration = probed if probed is not None else seg.estimated_duration_seconds
+            drift = _duration_drift_issue(
+                duration,
+                seg.estimated_duration_seconds,
+                config,
+            )
+            if drift and attempt == 1:
+                console.print(f"    [yellow]{drift}; {retry_note}[/yellow]")
+                continue
+            if drift:
+                qa_issues.append(drift)
+            break
+
+        if result["success"]:
+            manifest[seg.segment_id] = {
+                "audio_path": str(audio_path),
+                "duration_seconds": duration,
+                "qa_issues": qa_issues,
+            }
+            synthesized.append(seg.segment_id)
+            if qa_issues:
+                flagged.append({"segment_id": seg.segment_id, "qa_issues": qa_issues})
+            issue_note = " [yellow](QA issue)[/yellow]" if qa_issues else ""
+            console.print(f"    [green]-> {audio_path.name} ({duration:.1f}s)[/green]{issue_note}")
+        else:
+            error = result.get("error") or "TTS failed"
+            console.print(f"    [red]FAILED: {error}[/red]")
+            # duration_seconds stays 0 and "failed" is set so downstream steps
+            # (videogen/manifest) can't treat this segment as having real audio.
+            manifest[seg.segment_id] = {
+                "audio_path": str(audio_path),
+                "duration_seconds": 0,
+                "failed": True,
+                "error": error,
+                "qa_issues": [error],
+            }
+            failed.append({"segment_id": seg.segment_id, "error": error})
+
+    manifest["_voice"] = voice_meta
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    total = sum(
+        float(entry.get("duration_seconds") or 0)
+        for key, entry in manifest.items()
+        if not key.startswith("_")
+    )
+    engine = "Voicebox" if provider == "voicebox" else "Qwen3-TTS"
+    console.print(
+        f"[green]Synthesized {len(synthesized)} segments, skipped {len(skipped)} "
+        f"({total:.1f}s total) via {engine}[/green]"
+    )
+    console.print(f"  Manifest: {manifest_path}")
+    print(json.dumps({
+        "synthesized": synthesized, "skipped": skipped, "failed": failed,
+        "qa_flagged": flagged, "voice": voice_meta,
+        "manifest_path": str(manifest_path),
+    }))
+    if failed or flagged:
+        # Exit non-zero (like imagegen/videogen) so callers can't mistake a
+        # run with failed or QA-flagged narration for success.
+        console.print(
+            f"[red]synthesize: {len(failed)} segment(s) failed, "
+            f"{len(flagged)} with QA issues[/red]"
+        )
+        sys.exit(2)
 
 
 def cmd_silence(script_json: str, output_dir: str):
@@ -340,6 +419,8 @@ def cmd_silence(script_json: str, output_dir: str):
         manifest[seg.segment_id] = {
             "audio_path": str(audio_path),
             "duration_seconds": duration,
+            # Placeholder track — cmd_synthesize must never reuse it as a take.
+            "silent": True,
         }
         console.print(f"  [dim]Silent: {seg.segment_id} ({duration:.1f}s)[/dim]")
 
@@ -408,6 +489,38 @@ def cmd_fallback(segment_id: str, title: str, description: str, duration: str, w
     }))
 
 
+# Rough documentary-narration speaking pace used only to sanity-check a
+# script's estimated_duration_seconds before synthesize ever runs (empirical
+# baseline: ~110-130 wpm observed across Qwen3-TTS takes in this pipeline —
+# deliberately conservative so we warn on clearly-wrong estimates, not merely
+# fast ones).
+_NARRATION_WORDS_PER_SECOND = 2.2
+
+
+def _implausible_duration_warning(seg, config) -> dict[str, str] | None:
+    """Flag a segment whose estimated_duration_seconds can't plausibly fit its
+    narration_text, so a bad guess is caught at the preproduction gate instead
+    of surfacing later as a synthesize QA failure (duration drift) after a
+    wasted TTS generation."""
+    text = (seg.narration_text or "").strip()
+    estimated = float(seg.estimated_duration_seconds or 0)
+    if not text or estimated <= 0:
+        return None
+    word_count = len(text.split())
+    expected = word_count / _NARRATION_WORDS_PER_SECOND
+    if expected <= 0 or expected / estimated <= config.qa_max_audio_duration_ratio:
+        return None
+    return {
+        "segment_id": seg.segment_id,
+        "warning": (
+            f"estimated_duration_seconds ({estimated:.1f}s) looks too short for "
+            f"~{word_count} words of narration (~{expected:.1f}s at a typical "
+            f"narration pace) — synthesize will likely produce audio that trips "
+            f"the duration-drift QA check. Raise the estimate before running synthesize."
+        ),
+    }
+
+
 def cmd_storyboard(script_json: str, run_dir: str):
     """Write a storyboard manifest from the script's scene beats and diagram cues."""
     from .analysis.script_writer import load_script
@@ -433,10 +546,19 @@ def cmd_storyboard(script_json: str, run_dir: str):
     total_frames = 0
 
     for seg in script.segments:
+        duration_warning = _implausible_duration_warning(seg, config)
+        if duration_warning:
+            warnings.append(duration_warning)
+
         audio_entry = audio_manifest.get(seg.segment_id)
+        # Failed synthesis entries carry duration 0 — fall back to the estimate
+        # rather than storyboarding a zero-length segment.
+        entry_duration = (
+            float(audio_entry.get("duration_seconds") or 0) if audio_entry else 0.0
+        )
         segment_duration = (
-            float(audio_entry.get("duration_seconds", 0))
-            if audio_entry
+            entry_duration
+            if audio_entry and not audio_entry.get("failed") and entry_duration > 0
             else float(seg.estimated_duration_seconds or 0)
         )
 
@@ -616,6 +738,12 @@ def cmd_imagegen(script_json: str, run_dir: str, segment_ids: str = ""):
         "generated": generated, "skipped": skipped, "failed": failed,
         "images_dir": str(images_dir),
     }))
+    if failed:
+        # Exit non-zero (like cmd_manifest) so callers — especially the studio
+        # chat agent's imagegen tool, which flags errors by exit code — can't
+        # mistake a partially/fully failed image pass for success.
+        console.print(f"[red]imagegen: {len(failed)} beat(s) failed[/red]")
+        sys.exit(2)
 
 
 def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
@@ -646,7 +774,7 @@ def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
     audio_manifest = json.loads(manifest_path.read_text()) if manifest_path.exists() else {}
 
     only = {s.strip() for s in segment_ids.split(",") if s.strip()}
-    generated, skipped, failed = [], [], []
+    generated, skipped, failed, fallbacks = [], [], [], []
 
     scene_index = 0
     for seg in script.segments:
@@ -660,11 +788,15 @@ def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
             continue
 
         # Duration: prefer the real audio duration; fall back to the estimate.
+        # Entries from a failed synthesis ("failed": true, duration 0) count as
+        # missing — never size clips from a fake duration.
         entry = audio_manifest.get(seg.segment_id)
-        segment_duration = entry["duration_seconds"] if entry else seg.estimated_duration_seconds
-        if not entry:
+        entry_duration = float(entry.get("duration_seconds") or 0) if entry else 0.0
+        usable_entry = bool(entry) and not entry.get("failed") and entry_duration > 0
+        segment_duration = entry_duration if usable_entry else seg.estimated_duration_seconds
+        if not usable_entry:
             console.print(
-                f"[yellow]{seg.segment_id}: no audio manifest entry, "
+                f"[yellow]{seg.segment_id}: no usable audio manifest entry, "
                 f"using estimate {segment_duration:.1f}s[/yellow]"
             )
         beat_durations = split_beat_durations(float(segment_duration), beats)
@@ -710,10 +842,17 @@ def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
                     )
                 if not result["success"] and config.video_fallback_to_kenburns:
                     console.print(f"[yellow]LTX failed ({result['error_message']}); Ken Burns fallback[/yellow]")
+                    ltx_error = result["error_message"]
                     result = kenburns_clip(
                         img, out, duration, resolution=config.resolution, fps=config.frame_rate,
                         zoom=config.kenburns_zoom, direction=direction,
                     )
+                    if result["success"]:
+                        fallbacks.append({
+                            "segment_id": seg.segment_id,
+                            "beat_id": beat.beat_id,
+                            "ltx_error": ltx_error,
+                        })
             elif config.video_provider == "comfyui":
                 from .videogen.comfyui import image_to_video
                 result = image_to_video(
@@ -738,8 +877,22 @@ def cmd_videogen(script_json: str, run_dir: str, segment_ids: str = ""):
 
     print(json.dumps({
         "generated": generated, "skipped": skipped, "failed": failed,
-        "clips_dir": str(clips_dir),
+        "fallbacks": fallbacks, "clips_dir": str(clips_dir),
     }))
+    if fallbacks:
+        # Fallback pans are allowed (config.video_fallback_to_kenburns) but must
+        # be LOUD: a run where every "motion" clip is secretly a Ken Burns pan
+        # reads as "the video generator didn't actually make videos".
+        console.print(
+            f"[yellow]videogen: {len(fallbacks)} clip(s) are Ken Burns fallbacks, "
+            f"not real AI motion — first LTX error: {fallbacks[0]['ltx_error']}[/yellow]"
+        )
+    if failed:
+        # Exit non-zero (like cmd_manifest) so callers — especially the studio
+        # chat agent's videogen tool, which flags errors by exit code — can't
+        # mistake missing clips for success and composite an unfinished video.
+        console.print(f"[red]videogen: {len(failed)} beat(s) failed[/red]")
+        sys.exit(2)
 
 
 def cmd_manifest(script_json: str, run_dir: str, output_path: str = ""):
@@ -768,8 +921,16 @@ def cmd_manifest(script_json: str, run_dir: str, output_path: str = ""):
             video_paths.extend(str(path) for path in seg_videos)
 
         audio_entry = audio_manifest.get(seg.segment_id)
-        audio_path = Path(audio_entry.get("audio_path", "")) if audio_entry else None
-        if not audio_path or not audio_path.exists():
+        raw_audio = (audio_entry or {}).get("audio_path")
+        audio_path = Path(raw_audio) if raw_audio else None
+        # "failed" entries come from a failed synthesis; even if a partial wav
+        # exists on disk it must not be composited as real narration.
+        if (
+            not audio_entry
+            or audio_entry.get("failed")
+            or not audio_path
+            or not audio_path.exists()
+        ):
             missing.append({"segment_id": seg.segment_id, "artifact": "audio"})
             segment_audio = None
         else:

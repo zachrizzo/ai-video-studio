@@ -118,6 +118,38 @@ export interface Project {
   conversations: ProjectConversation[]
 }
 
+export interface Preset {
+  id: string
+  name: string
+  description: string
+  builtin: boolean
+  style_prompt: string
+  video_length_minutes: number
+  voice_speaker: string
+  voice_language: string
+  video_provider: string
+  narration_style: string
+  style_pack?: string | null
+  default_visual_engine?: string | null
+  sfx_style?: string | null
+  tts_provider?: string | null
+  voicebox_profile?: string | null
+  // Generation-quality overrides — undefined/null means "use the pipeline's
+  // own default", never a value this UI invents on its own.
+  image_model?: string | null
+  image_steps?: number | null
+  image_quantize?: number | null
+  ltx_steps?: number | null
+  ltx_resolution?: string | null
+  ltx_clip_seconds?: number | null
+  ltx_cfg_scale?: number | null
+  ltx_stg_scale?: number | null
+  ltx_prefer_extend?: boolean | null
+  video_fallback_to_kenburns?: boolean | null
+  kenburns_zoom?: number | null
+  qwen_model_size?: string | null
+}
+
 export interface RunDetail {
   id: string
   title: string
@@ -150,6 +182,46 @@ export async function fetchRun(runId: string): Promise<RunDetail> {
 export async function fetchProjects(): Promise<Project[]> {
   const data = await apiFetch<{ projects: Project[] }>('/api/projects')
   return data.projects
+}
+
+export async function fetchPresets(): Promise<Preset[]> {
+  const data = await apiFetch<{ presets: Preset[] }>('/api/presets')
+  return data.presets ?? []
+}
+
+export interface StylePackDetail {
+  id: string
+  name: string
+  description: string
+  palette: Record<string, string>
+  type: Record<string, string>
+  motion: Record<string, number | string>
+  texture: Record<string, number | string>
+  flux_prefix: string
+  flux_suffix: string
+  fonts: string[]
+}
+
+export async function fetchStylePackDetail(id: string): Promise<StylePackDetail> {
+  return apiFetch<StylePackDetail>(`/api/style_packs/${id}`)
+}
+
+export interface VoiceboxProfile {
+  id: string
+  name: string
+  default_engine: string | null
+}
+
+export interface VoiceboxProfilesResponse {
+  profiles: VoiceboxProfile[]
+  available: boolean
+  message: string | null
+}
+
+/** Voicebox being unreachable is a normal, expected state (app not running),
+ * not an error — this never throws; check `available` instead. */
+export async function fetchVoiceboxProfiles(): Promise<VoiceboxProfilesResponse> {
+  return apiFetch<VoiceboxProfilesResponse>('/api/voicebox/profiles')
 }
 
 export async function createProject(name: string): Promise<Project> {

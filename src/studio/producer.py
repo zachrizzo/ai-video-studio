@@ -37,13 +37,23 @@ def _now() -> float:
 
 
 def _safe_run_dir(run_id: str) -> Path:
-    if "/" in run_id or "\\" in run_id or run_id in {"", ".", ".."}:
-        raise ValueError("invalid run id")
+    """Resolve run_id under the runs root, rejecting traversal.
+
+    Canonical validator — agent_tools._resolve_run_dir delegates here so the
+    producer and the chat tools can never disagree on what a valid run id is.
+    """
+    if (
+        not isinstance(run_id, str)
+        or "/" in run_id
+        or "\\" in run_id
+        or run_id in {"", ".", ".."}
+    ):
+        raise ValueError(f"invalid run id: {run_id!r}")
 
     root = _runs_root().resolve()
     run_dir = (root / run_id).resolve()
-    if run_dir != root and root not in run_dir.parents:
-        raise ValueError("invalid run id")
+    if run_dir == root or root not in run_dir.parents:
+        raise ValueError(f"invalid run id: {run_id!r}")
     return run_dir
 
 
@@ -282,9 +292,10 @@ def _run_production(
     status = _initial_status(run_id, len(steps), mode, force_video, segment_ids)
     _write_status(run_dir, status)
 
+    # Video provider / LTX settings come from PipelineConfig defaults (env or
+    # .env overrides included) — do not re-pin them here, or the two defaults
+    # can silently drift apart.
     env = os.environ.copy()
-    env.setdefault("PTV_VIDEO_PROVIDER", "ltx")
-    env.setdefault("PTV_LTX_PREFER_EXTEND", "false")
     if force_video:
         env["PTV_VIDEO_FORCE"] = "true"
     if speed is not None:

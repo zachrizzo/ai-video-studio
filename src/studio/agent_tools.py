@@ -28,17 +28,10 @@ _OUTPUT_TAIL_CHARS = 4000
 
 
 def _resolve_run_dir(run_id: Any) -> Path:
-    """Mirror producer._safe_run_dir: reject traversal, resolve under runs root."""
-    from src.studio.runs import _runs_root
+    """Reject traversal and resolve under the runs root (producer._safe_run_dir)."""
+    from src.studio.producer import _safe_run_dir
 
-    if not isinstance(run_id, str) or "/" in run_id or "\\" in run_id or run_id in {"", ".", ".."}:
-        raise ValueError(f"invalid run id: {run_id!r}")
-
-    root = _runs_root().resolve()
-    run_dir = (root / run_id).resolve()
-    if run_dir == root or root not in run_dir.parents:
-        raise ValueError(f"invalid run id: {run_id!r}")
-    return run_dir
+    return _safe_run_dir(run_id)
 
 
 def _ok(data: Any) -> dict[str, Any]:
@@ -112,7 +105,12 @@ def _schema(properties: dict[str, dict[str, Any]], required: list[str]) -> dict[
 @tool("create_run", "Create a new run directory for a video (pipeline setup). "
       "Returns run_id and run_dir; write <run_dir>/script.json next.", {})
 async def create_run_tool(args: dict[str, Any]) -> dict[str, Any]:
-    code, out = await _run_pipeline("setup", ["/tmp/paper-to-video"])
+    from src.studio.runs import _runs_root
+
+    # Must match the root every other tool/list_runs/get_run resolves against
+    # (src.studio.runs._runs_root) — a stale hardcoded path here silently
+    # creates runs the Studio UI's flow viewer can never find or display.
+    code, out = await _run_pipeline("setup", [str(_runs_root())])
     return _step_result("setup", code, out)
 
 
@@ -163,29 +161,49 @@ manifest_tool = _simple_step(
 @tool("synthesize",
       "Synthesize narration for all script segments into <run_dir>/audio. Defaults to local "
       "Qwen3-TTS; pass voice_provider='voicebox' + voicebox_profile for Voicebox voices "
-      "(the Voicebox app must be running; no silent fallback).",
+      "(the Voicebox app must be running; no silent fallback). qwen_model_size ('0.6B' "
+      "default or '1.7B' for higher quality) applies to the Qwen path; language applies "
+      "to whichever provider is active. Skips segments that already have a good take "
+      "unless force=true; re-uses the run's persisted voice on resume unless voice "
+      "params are passed explicitly. Fails (is_error) when any segment's TTS fails or "
+      "its audio still carries QA issues — fix those before videogen/composite.",
       _schema({"run_id": _STR, "voice_provider": _STR, "speaker": _STR,
-               "language": _STR, "voicebox_profile": _STR}, ["run_id"]))
+               "language": _STR, "voicebox_profile": _STR, "qwen_model_size": _STR,
+               "force": _BOOL}, ["run_id"]))
 async def synthesize_tool(args: dict[str, Any]) -> dict[str, Any]:
     try:
         run_dir = _resolve_run_dir(args.get("run_id"))
         script = _script_path(run_dir)
     except (ValueError, FileNotFoundError) as exc:
         return _err(str(exc))
+    language = args.get("language", "")
     env = {
         "PTV_VOICE_PROVIDER": args.get("voice_provider", ""),
         "PTV_QWEN_TTS_SPEAKER": args.get("speaker", ""),
-        "PTV_QWEN_TTS_LANGUAGE": args.get("language", ""),
+        # Both providers read their own language env var — set from the same
+        # `language` arg so callers don't need to know which is active.
+        "PTV_QWEN_TTS_LANGUAGE": language,
+        "PTV_VOICEBOX_LANGUAGE": language,
         "PTV_VOICEBOX_PROFILE": args.get("voicebox_profile", ""),
+        "PTV_QWEN_TTS_MODEL_SIZE": args.get("qwen_model_size", ""),
     }
+    if args.get("force"):
+        env["PTV_AUDIO_FORCE"] = "true"
     code, out = await _run_pipeline("synthesize", [str(script), str(run_dir / "audio")], env)
     return _step_result("synthesize", code, out)
 
 
-def _filtered_step(name: str, description: str):
-    """Register a pipeline step taking run_id + optional segment_ids filter."""
+def _filtered_step(name: str, description: str, force_env: str = ""):
+    """Register a pipeline step taking run_id + optional segment_ids filter.
 
-    @tool(name, description, _schema({"run_id": _STR, "segment_ids": _STR}, ["run_id"]))
+    force_env: when set, the tool grows an optional boolean `force` param that
+    maps to that PTV_*_FORCE env var for the subprocess.
+    """
+    properties = {"run_id": _STR, "segment_ids": _STR}
+    if force_env:
+        properties["force"] = _BOOL
+
+    @tool(name, description, _schema(properties, ["run_id"]))
     async def handler(args: dict[str, Any]) -> dict[str, Any]:
         try:
             run_dir = _resolve_run_dir(args.get("run_id"))
@@ -196,7 +214,8 @@ def _filtered_step(name: str, description: str):
         segment_ids = args.get("segment_ids", "")
         if segment_ids:
             argv.append(segment_ids)
-        code, out = await _run_pipeline(name, argv)
+        env = {force_env: "true"} if force_env and args.get("force") else None
+        code, out = await _run_pipeline(name, argv, env)
         return _step_result(name, code, out)
 
     return handler
@@ -214,18 +233,51 @@ collage_tool = _filtered_step(
     "segment_ids: optional comma-separated filter.",
 )
 
-imagegen_tool = _filtered_step(
-    "imagegen",
-    "Generate FLUX still images for scene segment visual beats. "
-    "segment_ids: optional comma-separated segment/beat filter.",
-)
+@tool("imagegen",
+      "Generate still images for scene segment visual beats. Defaults to "
+      "z-image-turbo (model='z-image-turbo'); pass model='schnell' for the "
+      "faster/lower-quality FLUX fallback. steps/quantize override the "
+      "model's defaults (z-image-turbo: steps~8, quantize 4). Skips beats "
+      "whose PNG already exists; to regenerate failing segments (e.g. in a "
+      "QA fix loop) pass force=true with segment_ids. segment_ids: optional "
+      "comma-separated segment/beat filter.",
+      _schema({"run_id": _STR, "segment_ids": _STR, "model": _STR,
+               "steps": _NUM, "quantize": _NUM, "force": _BOOL}, ["run_id"]))
+async def imagegen_tool(args: dict[str, Any]) -> dict[str, Any]:
+    try:
+        run_dir = _resolve_run_dir(args.get("run_id"))
+        script = _script_path(run_dir)
+    except (ValueError, FileNotFoundError) as exc:
+        return _err(str(exc))
+    argv = [str(script), str(run_dir)]
+    segment_ids = args.get("segment_ids", "")
+    if segment_ids:
+        argv.append(segment_ids)
+    env = {
+        "PTV_IMAGE_MODEL": args.get("model", ""),
+        "PTV_IMAGE_STEPS": str(args["steps"]) if args.get("steps") is not None else "",
+        "PTV_IMAGE_QUANTIZE": str(args["quantize"]) if args.get("quantize") is not None else "",
+    }
+    if args.get("force"):
+        env["PTV_IMAGE_FORCE"] = "true"
+    code, out = await _run_pipeline("imagegen", argv, env)
+    return _step_result("imagegen", code, out)
 
 
 @tool("videogen",
       "Turn scene stills into motion clips matching each segment's audio duration. "
       "Defaults to LTX-2.3 (video_provider='ltx'); 'kenburns' only for static/pan-only "
-      "motion or fallback. segment_ids: optional comma-separated filter.",
-      _schema({"run_id": _STR, "segment_ids": _STR, "video_provider": _STR}, ["run_id"]))
+      "motion or fallback. steps/resolution ('WIDTHxHEIGHT')/clip_seconds/cfg_scale/"
+      "stg_scale/prefer_extend tune LTX generation; fallback_to_kenburns (default true) "
+      "and kenburns_zoom control the fallback used when LTX fails. Skips beats whose "
+      "clip already exists; to actually redo clips (e.g. after audio changed or in a "
+      "QA fix loop) pass force=true with segment_ids. segment_ids: optional "
+      "comma-separated filter.",
+      _schema({"run_id": _STR, "segment_ids": _STR, "video_provider": _STR,
+               "steps": _NUM, "resolution": _STR, "clip_seconds": _NUM,
+               "cfg_scale": _NUM, "stg_scale": _NUM, "prefer_extend": _BOOL,
+               "fallback_to_kenburns": _BOOL, "kenburns_zoom": _NUM,
+               "force": _BOOL}, ["run_id"]))
 async def videogen_tool(args: dict[str, Any]) -> dict[str, Any]:
     try:
         run_dir = _resolve_run_dir(args.get("run_id"))
@@ -237,6 +289,30 @@ async def videogen_tool(args: dict[str, Any]) -> dict[str, Any]:
     if segment_ids:
         argv.append(segment_ids)
     env = {"PTV_VIDEO_PROVIDER": args.get("video_provider", "")}
+    if args.get("steps") is not None:
+        env["PTV_LTX_STEPS"] = str(args["steps"])
+    resolution = args.get("resolution", "")
+    if resolution:
+        try:
+            width_str, height_str = resolution.lower().split("x", 1)
+            env["PTV_LTX_GEN_WIDTH"] = str(int(width_str))
+            env["PTV_LTX_GEN_HEIGHT"] = str(int(height_str))
+        except ValueError:
+            return _err(f"invalid resolution {resolution!r} — expected 'WIDTHxHEIGHT', e.g. '704x448'")
+    if args.get("clip_seconds") is not None:
+        env["PTV_LTX_CLIP_SECONDS"] = str(args["clip_seconds"])
+    if args.get("cfg_scale") is not None:
+        env["PTV_LTX_CFG_SCALE"] = str(args["cfg_scale"])
+    if args.get("stg_scale") is not None:
+        env["PTV_LTX_STG_SCALE"] = str(args["stg_scale"])
+    if "prefer_extend" in args:
+        env["PTV_LTX_PREFER_EXTEND"] = "true" if args["prefer_extend"] else "false"
+    if "fallback_to_kenburns" in args:
+        env["PTV_VIDEO_FALLBACK_TO_KENBURNS"] = "true" if args["fallback_to_kenburns"] else "false"
+    if args.get("kenburns_zoom") is not None:
+        env["PTV_KENBURNS_ZOOM"] = str(args["kenburns_zoom"])
+    if args.get("force"):
+        env["PTV_VIDEO_FORCE"] = "true"
     code, out = await _run_pipeline("videogen", argv, env)
     return _step_result("videogen", code, out)
 
@@ -274,14 +350,16 @@ async def qa_tool(args: dict[str, Any]) -> dict[str, Any]:
     if args.get("strict"):
         argv.append("strict")
     code, out = await _run_pipeline("qa", argv)
+    # Attach the parsed report unconditionally: cmd_qa exits 0 on warnings, and
+    # the truncated stdout tail can cut off the report's head — the agent must
+    # always see the full structured result.
     extra: dict[str, Any] = {}
-    if code != 0:
-        report_path = run_dir / "qa_report.json"
-        if report_path.exists():
-            try:
-                extra["qa_report"] = json.loads(report_path.read_text(encoding="utf-8"))
-            except (OSError, json.JSONDecodeError):
-                pass
+    report_path = run_dir / "qa_report.json"
+    if report_path.exists():
+        try:
+            extra["qa_report"] = json.loads(report_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            pass
     return _step_result("qa", code, out, extra)
 
 
@@ -330,7 +408,9 @@ async def capabilities_tool(args: dict[str, Any]) -> dict[str, Any]:
 @tool("produce_run",
       "Start (or resume) background production of a run that already has script.json. "
       "mode: 'full' (default), 'videos' (keep images, redo clips onward), or 'clips' "
-      "(selected repair clips only). Poll production_status for progress.",
+      "(selected repair clips only). Existing clips are skipped, so mode 'videos' "
+      "requires force_video=true to actually redo clips. Poll production_status "
+      "for progress.",
       _schema({"run_id": _STR, "mode": _STR, "force_video": _BOOL, "segment_ids": _STR},
               ["run_id"]))
 async def produce_run_tool(args: dict[str, Any]) -> dict[str, Any]:
@@ -440,12 +520,18 @@ async def video_hdr_tool(args: dict[str, Any]) -> dict[str, Any]:
 async def tts_tool(args: dict[str, Any]) -> dict[str, Any]:
     from src.studio import generate
 
+    # Only pass what the caller supplied — generate.start_tts owns the one-shot
+    # voice defaults, so they cannot drift from a second copy here.
+    kwargs: dict[str, Any] = {}
+    if args.get("speaker"):
+        kwargs["speaker"] = args["speaker"]
+    if args.get("language"):
+        kwargs["language"] = args["language"]
     gen_id = generate.start_tts(
         text=args["text"],
-        speaker=args.get("speaker") or "serena",
-        language=args.get("language") or "auto",
         provider=args.get("provider") or None,
         voicebox_profile=args.get("voicebox_profile") or None,
+        **kwargs,
     )
     return _ok({"gen_id": gen_id, "status": "generating"})
 

@@ -444,6 +444,101 @@
   color: var(--text-dim);
 }
 
+/* Clickable images — open the lightbox */
+.seg-image-clickable,
+.beat-thumb-clickable {
+  cursor: zoom-in;
+  transition: filter var(--transition), border-color var(--transition);
+}
+
+.seg-image-clickable:hover,
+.beat-thumb-clickable:hover {
+  filter: brightness(1.08);
+  border-color: var(--border-bright);
+}
+
+/* ── Image lightbox ────────────────────────────────────────────────────────── */
+.lightbox-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  background: rgba(6, 6, 12, 0.88);
+  backdrop-filter: blur(4px);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--space-8);
+  cursor: zoom-out;
+  animation: lightbox-fade-in 0.15s ease;
+}
+
+@keyframes lightbox-fade-in {
+  from { opacity: 0; }
+  to   { opacity: 1; }
+}
+
+.lightbox-image {
+  max-width: min(1100px, 100%);
+  max-height: calc(100vh - var(--space-8) * 2);
+  object-fit: contain;
+  border-radius: var(--radius);
+  border: 1px solid var(--border-bright);
+  box-shadow: var(--shadow-pop);
+  cursor: default;
+}
+
+.lightbox-close,
+.lightbox-nav {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: var(--bg-raised);
+  border: 1px solid var(--border-bright);
+  color: var(--text);
+  border-radius: 99px;
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.lightbox-close:hover,
+.lightbox-nav:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-dim);
+}
+
+.lightbox-close {
+  top: var(--space-5);
+  right: var(--space-5);
+  width: 38px;
+  height: 38px;
+}
+
+.lightbox-nav {
+  top: 50%;
+  transform: translateY(-50%);
+  width: 44px;
+  height: 44px;
+}
+
+.lightbox-prev { left: var(--space-5); }
+.lightbox-next { right: var(--space-5); }
+
+.lightbox-caption {
+  position: absolute;
+  bottom: var(--space-5);
+  left: 50%;
+  transform: translateX(-50%);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 99px;
+  padding: 4px 12px;
+}
+
 .beat-progress {
   font-size: var(--text-2xs);
   color: var(--text-muted);

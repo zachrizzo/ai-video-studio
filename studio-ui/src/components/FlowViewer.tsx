@@ -9,6 +9,7 @@ import type {
   StartRunProductionOptions,
 } from '../api'
 import { SegmentCard } from './SegmentCard'
+import { formatDuration } from './formatters'
 
 interface FlowViewerProps {
   /** run_id to highlight / auto-refresh when an artifact_updated event arrives */
@@ -22,17 +23,27 @@ function inProject(run: RunSummary, projectId: string | null): boolean {
   return (run.project_id || 'default') === (projectId || 'default')
 }
 
-function formatDuration(s: number): string {
-  const m = Math.floor(s / 60)
-  const sec = Math.round(s % 60)
-  if (m > 0) return `${m}m ${sec}s`
-  return `${sec}s`
+// ── Pipeline stages ──────────────────────────────────────────────────────────
+// The real step order comes from the backend (GET /api/pipeline-steps, which
+// exposes producer._pipeline_steps). The frontend only owns the cosmetic
+// grouping of those steps into plain-language stages so the stepper stays
+// readable; unknown step ids fall back to their backend-provided label.
+
+interface PipelineStep {
+  id: string
+  label: string
 }
 
-// ── Pipeline stages ──────────────────────────────────────────────────────────
-// Mirrors the real step order in src/studio/producer.py (_pipeline_steps).
-// Several backend steps are grouped into one plain-language stage so the
-// stepper stays readable.
+type PipelineStepsByMode = Record<string, PipelineStep[]>
+
+async function fetchPipelineSteps(): Promise<PipelineStepsByMode> {
+  const res = await fetch('/api/pipeline-steps')
+  if (!res.ok) {
+    throw new Error(`API /api/pipeline-steps → ${res.status} ${res.statusText}`)
+  }
+  const data = (await res.json()) as { modes: PipelineStepsByMode }
+  return data.modes
+}
 
 const STAGE_LABELS: Record<string, string> = {
   storyboard: 'Storyboard',
@@ -45,33 +56,20 @@ const STAGE_LABELS: Record<string, string> = {
   quality: 'Quality',
 }
 
-const PIPELINE_STEPS: Record<'full' | 'videos' | 'clips', Array<[string, string]>> = {
-  full: [
-    ['storyboard', 'storyboard'],
-    ['synthesize', 'narration'],
-    ['storyboard', 'timing'],
-    ['align', 'timing'],
-    ['sfx', 'sound'],
-    ['imagegen', 'images'],
-    ['assets', 'images'],
-    ['videogen', 'animation'],
-    ['collage', 'animation'],
-    ['manifest', 'assembly'],
-    ['composite', 'assembly'],
-    ['qa', 'quality'],
-  ],
-  videos: [
-    ['storyboard', 'timing'],
-    ['videogen', 'animation'],
-    ['collage', 'animation'],
-    ['manifest', 'assembly'],
-    ['composite', 'assembly'],
-    ['qa', 'quality'],
-  ],
-  clips: [
-    ['storyboard', 'timing'],
-    ['videogen', 'animation'],
-  ],
+// Step id → stage key. 'storyboard' means the timing refresh except when it is
+// the opening step of the full pipeline (the initial storyboard build).
+const STEP_STAGE: Record<string, string> = {
+  storyboard: 'timing',
+  synthesize: 'narration',
+  align: 'timing',
+  sfx: 'sound',
+  imagegen: 'images',
+  assets: 'images',
+  videogen: 'animation',
+  collage: 'animation',
+  manifest: 'assembly',
+  composite: 'assembly',
+  qa: 'quality',
 }
 
 type StageState = 'pending' | 'active' | 'done' | 'failed'
@@ -89,16 +87,20 @@ interface PipelineView {
 }
 
 /**
- * Map the backend production status onto the known pipeline. Returns null when
- * the reported step list doesn't match what we know (e.g. the pipeline changed)
- * so the caller can fall back to the honest raw status line instead of showing
- * a made-up stepper.
+ * Map the backend production status onto the backend-reported pipeline.
+ * Returns null when the steps haven't loaded yet or don't match what the
+ * production status reports (e.g. server restarted mid-deploy with a changed
+ * pipeline) so the caller can fall back to the honest raw status line instead
+ * of showing a made-up stepper.
  */
-function derivePipeline(production: RunProductionStatus): PipelineView | null {
-  const mode =
-    production.mode === 'videos' || production.mode === 'clips' ? production.mode : 'full'
-  const steps = PIPELINE_STEPS[mode]
-  if (production.total_steps !== steps.length) return null
+function derivePipeline(
+  production: RunProductionStatus,
+  stepsByMode: PipelineStepsByMode | null,
+): PipelineView | null {
+  if (!stepsByMode) return null
+  const mode = production.mode && stepsByMode[production.mode] ? production.mode : 'full'
+  const steps = stepsByMode[mode]
+  if (!steps || production.total_steps !== steps.length) return null
 
   let stepIdx: number
   if (production.status === 'done') {
@@ -108,8 +110,8 @@ function derivePipeline(production: RunProductionStatus): PipelineView | null {
     // starts, so this recovers the zero-based index of the current step.
     stepIdx = Math.round((production.progress / 100) * steps.length)
     stepIdx = Math.min(Math.max(stepIdx, 0), steps.length - 1)
-    if (production.step && steps[stepIdx][0] !== production.step) {
-      const byId = steps.findIndex(([id]) => id === production.step)
+    if (production.step && steps[stepIdx].id !== production.step) {
+      const byId = steps.findIndex((s) => s.id === production.step)
       if (byId === -1) return null
       stepIdx = byId
     }
@@ -117,9 +119,17 @@ function derivePipeline(production: RunProductionStatus): PipelineView | null {
 
   const broken = production.status === 'failed' || production.status === 'stalled'
   const stages: StageView[] = []
-  steps.forEach(([, stageKey], i) => {
+  steps.forEach((step, i) => {
+    const stageKey =
+      step.id === 'storyboard' && i === 0 && mode === 'full'
+        ? 'storyboard'
+        : STEP_STAGE[step.id] ?? step.id
     if (stages.length === 0 || stages[stages.length - 1].key !== stageKey) {
-      stages.push({ key: stageKey, label: STAGE_LABELS[stageKey] ?? stageKey, state: 'pending' })
+      stages.push({
+        key: stageKey,
+        label: STAGE_LABELS[stageKey] ?? step.label,
+        state: 'pending',
+      })
     }
     const stage = stages[stages.length - 1]
     if (i < stepIdx && stage.state === 'pending') stage.state = 'done'
@@ -131,8 +141,14 @@ function derivePipeline(production: RunProductionStatus): PipelineView | null {
 
 // ── Production progress strip ────────────────────────────────────────────────
 
-function ProductionProgress({ production }: { production: RunProductionStatus }) {
-  const pipeline = derivePipeline(production)
+function ProductionProgress({
+  production,
+  pipelineSteps,
+}: {
+  production: RunProductionStatus
+  pipelineSteps: PipelineStepsByMode | null
+}) {
+  const pipeline = derivePipeline(production, pipelineSteps)
   const running = production.status === 'running'
   const stalled = production.status === 'stalled'
   const progress = Math.min(Math.max(Math.round(production.progress), 0), 100)
@@ -210,10 +226,25 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
   const [produceBusy, setProduceBusy] = useState(false)
   const [produceError, setProduceError] = useState<string | null>(null)
   const [speed, setSpeed] = useState(1)
+  const [pipelineSteps, setPipelineSteps] = useState<PipelineStepsByMode | null>(null)
   const selectedIdRef = useRef<string | null>(null)
   useEffect(() => {
     selectedIdRef.current = selectedId
   }, [selectedId])
+
+  // ── Load pipeline step order once; on failure the progress strip simply
+  //    falls back to the plain status line instead of the stepper.
+  useEffect(() => {
+    let cancelled = false
+    fetchPipelineSteps()
+      .then((modes) => {
+        if (!cancelled) setPipelineSteps(modes)
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  }, [])
 
   // ── Load run list on mount and whenever the project changes ──────────────
   useEffect(() => {
@@ -244,20 +275,22 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
 
   // ── When an artifact event arrives, refresh the run list. If it names a run
   //    we don't have selected (e.g. a brand-new chat-created run), switch to it.
+  //    Runs outside the current project only refresh the list — a turn still
+  //    streaming for project A must not hijack the viewer while the user is
+  //    in project B.
   useEffect(() => {
     if (!artifactRefreshRunId) return
     fetchRuns()
       .then((r) => {
         setRuns(r)
-        const known = r.some((x) => x.id === artifactRefreshRunId)
-        const run = r.find((x) => x.id === artifactRefreshRunId)
-        if (known && artifactRefreshRunId !== selectedId) {
+        const run = r.find((x) => x.id === artifactRefreshRunId && inProject(x, currentProjectId))
+        if (run && artifactRefreshRunId !== selectedId) {
           setSelectedId(artifactRefreshRunId)
-          onRunIdChange(artifactRefreshRunId, run?.title)
+          onRunIdChange(artifactRefreshRunId, run.title)
         }
       })
       .catch(() => {})
-  }, [artifactRefreshRunId, selectedId, onRunIdChange])
+  }, [artifactRefreshRunId, selectedId, onRunIdChange, currentProjectId])
 
   // ── Load run detail whenever selected run changes ─────────────────────────
   const loadDetail = useCallback((runId: string, showLoading = true) => {
@@ -456,7 +489,9 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
       </div>
 
       {/* What's happening now */}
-      {showProductionStrip && production && <ProductionProgress production={production} />}
+      {showProductionStrip && production && (
+        <ProductionProgress production={production} pipelineSteps={pipelineSteps} />
+      )}
 
       {/* Final video */}
       {detail?.final_video_url && (

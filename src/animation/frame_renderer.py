@@ -41,10 +41,13 @@ def _chromium_launch_kwargs() -> dict:
         return {}
     # Prefer the full chromium build over the headless shell; pick the highest
     # revision if several are installed.
+    # macOS app-bundle name varies by Playwright/Chromium revision ("Chromium.app"
+    # on older revisions, "Google Chrome for Testing.app" after the rebrand), and
+    # the arch-specific directory can be chrome-mac, chrome-mac-x64, or
+    # chrome-mac-arm64 -- glob broadly rather than hardcoding one combination.
     patterns = [
         os.path.join(root, "chromium-*", "chrome-linux", "chrome"),
-        os.path.join(root, "chromium-*", "chrome-mac", "Chromium.app", "Contents", "MacOS", "Chromium"),
-        os.path.join(root, "chromium-*", "chrome-mac-arm64", "Chromium.app", "Contents", "MacOS", "Chromium"),
+        os.path.join(root, "chromium-*", "chrome-mac*", "*.app", "Contents", "MacOS", "*"),
     ]
     candidates = sorted(c for pattern in patterns for c in glob.glob(pattern))
     if candidates:
