@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import threading
 import time
 
@@ -183,3 +184,48 @@ def test_stop_run_production_no_active_job_is_idempotent_noop(run_dir):
     status = producer.stop_run_production("run_abc123")
     assert status["status"] == "idle"
     assert "run_abc123" not in producer._ACTIVE
+
+
+def test_run_command_kills_process_immediately_if_stop_requested_during_spawn(
+    run_dir, monkeypatch
+):
+    """Regression for the step-startup race: stop_run_production can be called
+    in the window between the step loop's stop_event check and _run_command's
+    job.process assignment, while Popen is still spawning. Since job.process
+    is None during that window, stop_run_production has nothing to kill, so
+    _run_command must re-check stop_event itself right after job.process is
+    set and kill the just-spawned process immediately rather than proceeding
+    to read its stdout / wait on it. Setting stop_event before calling
+    _run_command deterministically hits this exact path without racing real
+    threads."""
+    killed: list[subprocess.Popen] = []
+    real_kill = producer._kill_process_group
+
+    def spy_kill(proc):
+        killed.append(proc)
+        real_kill(proc)
+
+    monkeypatch.setattr(producer, "_kill_process_group", spy_kill)
+
+    job = producer.ProductionJob(
+        run_id="run_abc123", thread=threading.Thread(target=lambda: None)
+    )
+    job.stop_event.set()
+
+    with pytest.raises(producer.ProductionStopped):
+        producer._run_command(
+            run_dir=run_dir,
+            job=job,
+            status={},
+            step="slow_step",
+            step_label="Running slow step",
+            progress=0,
+            total_steps=1,
+            args=["sleep", "30"],
+            env=os.environ.copy(),
+        )
+
+    assert job.process is None
+    assert len(killed) == 1
+    proc = killed[0]
+    assert _wait_until(lambda: proc.poll() is not None), "spawned process was not killed"

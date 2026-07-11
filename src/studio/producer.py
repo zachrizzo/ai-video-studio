@@ -235,6 +235,15 @@ def _run_command(
     )
     job.process = proc
 
+    if job.stop_event.is_set():
+        # Stop was requested in the window between the step loop's check and
+        # this Popen call returning, so nothing was there yet for
+        # stop_run_production to kill. Catch it here instead of letting the
+        # step run unsupervised until the next loop iteration.
+        _kill_process_group(proc)
+        job.process = None
+        raise ProductionStopped(f"{step_label} stopped before start")
+
     try:
         assert proc.stdout is not None
         for line in proc.stdout:
