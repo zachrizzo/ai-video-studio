@@ -280,6 +280,10 @@ async def render_frames(
 
     if error_message:
         console.print(f"[red]Scene {spec.segment_id}: {error_message}[/red]")
+        # A frame-count mismatch means the encoded mp4 is corrupt; don't leave
+        # it on disk where skip-if-exists callers (compositor, QA) would
+        # mistake its mere presence for a valid render.
+        output_path.unlink(missing_ok=True)
     else:
         console.print(
             f"[green]Frame-rendered scene: {spec.segment_id} "
@@ -288,7 +292,7 @@ async def render_frames(
 
     return RenderResult(
         segment_id=spec.segment_id,
-        video_path=output_path,
+        video_path=output_path if error_message is None else Path(""),
         actual_duration_seconds=actual_duration,
         visual_engine=spec.visual_engine,
         success=error_message is None,

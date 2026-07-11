@@ -4,6 +4,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import src.animation.frame_renderer as frame_renderer
 from src.animation.html_renderer import render_html
 from src.animation.models import SceneSpec
 
@@ -82,6 +83,33 @@ def test_frame_renderer_produces_frame_accurate_collage(tmp_path: Path) -> None:
     # TRUE duration is frames / fps = round(2 * 12) / 12 = 2.0 exactly.
     assert abs(result.actual_duration_seconds - 2.0) < 1e-9
     assert abs(_ffprobe_duration(result.video_path) - 2.0) <= 0.05
+
+
+def test_frame_renderer_deletes_corrupt_output_on_frame_count_mismatch(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A frame-count mismatch must delete the (corrupt) mp4, not leave it on
+    disk where skip-if-exists callers would mistake it for a valid render."""
+    work_dir = tmp_path / "seg_003_render"
+    work_dir.mkdir(parents=True)
+
+    spec = SceneSpec(
+        segment_id="seg_003",
+        visual_engine="collage",
+        code=SEEK_HTML,
+        target_duration_seconds=2.0,
+        narration_text="A box slides across the frame.",
+        description="Frame-count mismatch should delete the corrupt output.",
+    )
+
+    monkeypatch.setattr(frame_renderer, "_probe_frame_count", lambda path: 1)
+
+    result = render_html(spec, work_dir, (320, 180), 12, 120)
+
+    assert not result.success
+    assert result.error_message and "frame count mismatch" in result.error_message
+    assert result.video_path == Path("")
+    assert not (work_dir / "seg_003_collage.mp4").exists()
 
 
 def test_frame_renderer_rejects_scene_without_seek(tmp_path: Path) -> None:

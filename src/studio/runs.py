@@ -335,9 +335,13 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             qa_segment,
         )
 
-        # Duration: prefer audio manifest, fall back to script estimate
-        if seg_id in audio_manifest:
-            duration_seconds = float(audio_manifest[seg_id].get("duration_seconds", 0))
+        # Duration: prefer audio manifest, fall back to script estimate. A
+        # failed segment's manifest entry has duration_seconds deliberately
+        # zeroed out, so it must fall back too rather than display as 0:00.
+        manifest_entry = audio_manifest.get(seg_id)
+        manifest_duration = float(manifest_entry.get("duration_seconds", 0)) if manifest_entry else 0.0
+        if manifest_entry and not manifest_entry.get("failed") and manifest_duration > 0:
+            duration_seconds = manifest_duration
         else:
             duration_seconds = float(seg.get("estimated_duration_seconds", 0))
 
@@ -361,15 +365,13 @@ def get_run(run_id: str) -> dict[str, Any] | None:
             }
         )
 
-    # Total duration: sum of audio manifest durations if available, else script estimate
-    if audio_manifest:
-        total_duration = sum(
-            float(v.get("duration_seconds", 0)) for v in audio_manifest.values()
-        )
+    # Total duration: sum of the (already-correct) per-segment durations, so
+    # this can't diverge from what the UI shows per segment; only fall back
+    # to the script estimate when there are no segments to sum at all.
+    if segments:
+        total_duration = sum(s["duration_seconds"] for s in segments)
     else:
         total_duration = float(script.get("total_estimated_duration_seconds", 0))
-        if total_duration == 0:
-            total_duration = sum(s["duration_seconds"] for s in segments)
 
     return {
         "id": run_id,

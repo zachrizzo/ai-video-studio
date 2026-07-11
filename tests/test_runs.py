@@ -5,8 +5,10 @@ import os
 import time
 from pathlib import Path
 
+import pytest
+
 from src.studio import runs
-from src.studio.runs import _runs_root, _scene_url, list_runs
+from src.studio.runs import _runs_root, _scene_url, get_run, list_runs
 
 
 def _touch_render(run_dir: Path, segment_id: str, suffix: str) -> Path:
@@ -143,3 +145,65 @@ def test_runs_root_migration_not_triggered_by_env_override(tmp_path: Path, monke
 
     assert _runs_root() == override
     assert (legacy / "run_old111" / "script.json").exists()
+
+
+# ---------------------------------------------------------------------------
+# get_run duration math: failed segments + the "_voice" meta key must not
+# distort per-segment or total durations.
+# ---------------------------------------------------------------------------
+
+
+def test_get_run_duration_falls_back_for_failed_segment_and_totals_per_segment(
+    tmp_path: Path, monkeypatch
+) -> None:
+    monkeypatch.setenv("STUDIO_RUNS_DIR", str(tmp_path))
+    run_dir = tmp_path / "run_mix001"
+    run_dir.mkdir()
+    (run_dir / "audio").mkdir()
+
+    script = {
+        "title": "Mixed Durations",
+        "segments": [
+            {
+                "segment_id": "seg_ok",
+                "section_title": "Intro",
+                "narration_text": "This one synthesized fine.",
+                "estimated_duration_seconds": 4.0,
+                "animation_cues": [],
+            },
+            {
+                "segment_id": "seg_failed",
+                "section_title": "Outro",
+                "narration_text": "This one failed synthesis.",
+                "estimated_duration_seconds": 6.0,
+                "animation_cues": [],
+            },
+        ],
+    }
+    (run_dir / "script.json").write_text(json.dumps(script))
+
+    audio_manifest = {
+        "seg_ok": {"audio_path": "audio_seg_ok.wav", "duration_seconds": 4.2, "qa_issues": []},
+        "seg_failed": {
+            "audio_path": "audio_seg_failed.wav",
+            "duration_seconds": 0,
+            "failed": True,
+            "error": "tts provider timeout",
+            "qa_issues": [],
+        },
+        "_voice": {"provider": "qwen", "speaker": "serena", "language": "english"},
+    }
+    (run_dir / "audio" / "audio_manifest.json").write_text(json.dumps(audio_manifest))
+
+    result = get_run("run_mix001")
+
+    assert result is not None
+    segments_by_id = {s["segment_id"]: s for s in result["segments"]}
+    # Real manifest duration wins for the successful segment.
+    assert segments_by_id["seg_ok"]["duration_seconds"] == pytest.approx(4.2)
+    # Failed segment falls back to the script estimate instead of showing 0:00.
+    assert segments_by_id["seg_failed"]["duration_seconds"] == pytest.approx(6.0)
+    # Total is the sum of the (corrected) per-segment durations, not a raw
+    # sum of audio_manifest.values() (which would include the "_voice" 0 and
+    # the failed segment's zeroed duration).
+    assert result["total_duration_seconds"] == pytest.approx(4.2 + 6.0)

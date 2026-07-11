@@ -174,18 +174,54 @@ class VideoCompositor:
         console.print(f"[dim]Concatenated {len(audio_paths)} audio segments[/dim]")
 
     def _merge_av(self, video_path: Path, audio_path: Path, output_path: Path, speed: float = 1.0) -> None:
-        """Merge video and audio with YouTube-optimized encoding."""
-        af = "loudnorm=I=-16:LRA=11:TP=-1.5"
+        """Merge video and audio with YouTube-optimized encoding.
+
+        ``-shortest`` alone silently truncates whichever stream is shorter. To
+        avoid ever cutting narration or picture short, the video is padded
+        (frozen last frame via ``tpad``) when it is the shorter stream, and
+        the audio is always given an unconditional ``apad`` so it never becomes
+        the accidental truncation point either; ``-shortest`` then lands on
+        the correctly padded, longer-of-the-two duration instead of the raw
+        shorter one.
+        """
+        video_duration = self._get_duration(video_path)
+        audio_duration = self._get_duration(audio_path)
+
+        vf_parts: list[str] = []
+        af_parts: list[str] = []
+
+        if speed != 1.0:
+            vf_parts.append(f"setpts=PTS/{speed:g}")
+            af_parts.append(atempo_chain(speed))
+        af_parts.append("loudnorm=I=-16:LRA=11:TP=-1.5")
+
+        if video_duration > 0:
+            gap = audio_duration - video_duration
+            if gap > 0.1:
+                # tpad is placed after setpts above, so stop_duration must be
+                # expressed in the already-retimed (post-setpts) timeline.
+                pad_seconds = gap / speed + 0.1
+                vf_parts.append(f"tpad=stop_mode=clone:stop_duration={pad_seconds:.2f}")
+            if gap > 5.0 or gap / video_duration > 0.10:
+                console.print(
+                    f"[bold red]AV duration mismatch for {video_path.name}: "
+                    f"video={video_duration:.2f}s audio={audio_duration:.2f}s "
+                    f"(gap={gap:.2f}s) — padding the shorter stream instead of truncating[/bold red]"
+                )
+
+        # Always pad audio with trailing silence so a video longer than the
+        # narration never gets truncated down to the narration's length either.
+        af_parts.append("apad")
+
         cmd = [
             "ffmpeg", "-y",
             "-i", str(video_path),
             "-i", str(audio_path),
             "-c:v", "libx264", "-preset", "slow", "-crf", "18",
         ]
-        if speed != 1.0:
-            cmd += ["-filter:v", f"setpts=PTS/{speed:g}"]
-            af = f"{atempo_chain(speed)},{af}"
-        cmd += ["-af", af]
+        if vf_parts:
+            cmd += ["-filter:v", ",".join(vf_parts)]
+        cmd += ["-af", ",".join(af_parts)]
         if speed != 1.0:
             cmd += ["-r", "30"]
         cmd += [
