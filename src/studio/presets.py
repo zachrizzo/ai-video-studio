@@ -190,10 +190,16 @@ _ENV_STR_KEYS = {
     "image_model": "PTV_IMAGE_MODEL",
     "video_provider": "PTV_VIDEO_PROVIDER",
 }
-_ENV_NUM_KEYS = {
+# int-typed PipelineConfig fields: coerce through int() so a hand-edited
+# preset's "40.0" can't reach the pipeline subprocess and fail its int parse
+# (mirrors agent_tools.py's imagegen_tool/videogen_tool treatment of the same
+# knobs).
+_ENV_INT_KEYS = {
     "image_steps": "PTV_IMAGE_STEPS",
     "image_quantize": "PTV_IMAGE_QUANTIZE",
     "ltx_steps": "PTV_LTX_STEPS",
+}
+_ENV_FLOAT_KEYS = {
     "ltx_clip_seconds": "PTV_LTX_CLIP_SECONDS",
     "ltx_cfg_scale": "PTV_LTX_CFG_SCALE",
     "ltx_stg_scale": "PTV_LTX_STG_SCALE",
@@ -215,7 +221,11 @@ def preset_env(preset: dict) -> dict[str, str]:
         value = preset.get(key)
         if value is not None:
             env[var] = str(value)
-    for key, var in _ENV_NUM_KEYS.items():
+    for key, var in _ENV_INT_KEYS.items():
+        value = preset.get(key)
+        if value is not None:
+            env[var] = str(int(value))
+    for key, var in _ENV_FLOAT_KEYS.items():
         value = preset.get(key)
         if value is not None:
             env[var] = str(value)
