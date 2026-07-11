@@ -1,12 +1,25 @@
 """Tests for the WS-agent helpers in src/studio/agent.py.
 
-Only the pure/filesystem helpers are covered — driving handle_ws needs a live
-Claude Agent SDK session. The key regression here: the end-of-turn run scan
-must only surface runs the turn actually touched, so concurrent terminal work
-can't hijack the viewer or mis-bind a chat.
+Most of this file covers the pure/filesystem helpers, since driving handle_ws
+end-to-end needs a live Claude Agent SDK session. The key regression there:
+the end-of-turn run scan must only surface runs the turn actually touched, so
+concurrent terminal work can't hijack the viewer or mis-bind a chat.
+
+The transcript-ordering regression test below (A10) is the exception: it
+drives handle_ws with a fake websocket and a fake ClaudeSDKClient (monkeypatched
+onto the claude_agent_sdk module, which handle_ws's local import re-reads at
+call time), since the bug is specifically about event ORDER within the
+appended transcript file — the pure helpers don't touch that file at all.
 """
 
+import asyncio
+import json
 from pathlib import Path
+
+import claude_agent_sdk
+import pytest
+from claude_agent_sdk.types import ResultMessage, StreamEvent
+from fastapi import WebSocketDisconnect
 
 from src.studio.agent import (
     _ARTIFACT_TOOLS,
@@ -17,6 +30,7 @@ from src.studio.agent import (
     _reported_run_id,
     _select_changed_runs,
     _snapshot_run_scripts,
+    handle_ws,
 )
 from src.studio.agent_tools import STUDIO_TOOL_NAMES
 
@@ -219,3 +233,147 @@ def test_reported_run_id_returns_run_when_seen_this_turn() -> None:
     seen = {"run_abcdef12"}
 
     assert _reported_run_id("conv-1", active_run_ids, seen) == "run_abcdef12"
+
+
+# ---------------------------------------------------------------------------
+# A10: streamed assistant text must be flushed to the transcript BEFORE an
+# error event from the same turn — the transcript is append-only, so file
+# order is display order on reload, and the text was generated first.
+# ---------------------------------------------------------------------------
+
+
+class _FakeWebSocket:
+    """Feeds one user_message frame, then blocks briefly (giving the turn task
+    time to finish) before raising a disconnect to end handle_ws's loop."""
+
+    def __init__(self, messages: list[str]) -> None:
+        self._messages = list(messages)
+        self.sent: list[dict] = []
+
+    async def accept(self) -> None:
+        pass
+
+    async def receive_text(self) -> str:
+        if self._messages:
+            return self._messages.pop(0)
+        await asyncio.sleep(0.2)
+        raise WebSocketDisconnect
+
+    async def send_json(self, msg: dict) -> None:
+        self.sent.append(msg)
+
+
+def _make_fake_client_cls(*, raise_exception: bool = False, captured_options: list | None = None):
+    """A fake ClaudeSDKClient that streams one text delta, then either raises
+    (exercising the `except Exception` site) or yields an is_error
+    ResultMessage (exercising the ResultMessage site) — the two flush sites
+    the fix touches. Also records the constructed ClaudeAgentOptions (A11)."""
+
+    class _FakeClient:
+        def __init__(self, options) -> None:
+            self.options = options
+            if captured_options is not None:
+                captured_options.append(options)
+
+        async def connect(self) -> None:
+            pass
+
+        async def query(self, text: str) -> None:
+            pass
+
+        async def receive_response(self):
+            yield StreamEvent(
+                uuid="e1",
+                session_id="sess-1",
+                event={
+                    "type": "content_block_delta",
+                    "delta": {"type": "text_delta", "text": "partial answer"},
+                },
+                parent_tool_use_id=None,
+            )
+            if raise_exception:
+                raise RuntimeError("boom")
+            yield ResultMessage(
+                subtype="error_max_turns",
+                duration_ms=1,
+                duration_api_ms=1,
+                is_error=True,
+                num_turns=1,
+                session_id="sess-1",
+                stop_reason=None,
+                total_cost_usd=None,
+                usage=None,
+                result="turn failed",
+                structured_output=None,
+                model_usage=None,
+                permission_denials=None,
+                deferred_tool_use=None,
+                errors=None,
+                api_error_status=None,
+                uuid="u1",
+            )
+
+        async def disconnect(self) -> None:
+            pass
+
+        async def interrupt(self) -> None:
+            pass
+
+    return _FakeClient
+
+
+def _run_one_turn(
+    tmp_path, monkeypatch, *, raise_exception: bool, captured_options: list | None = None
+) -> list[dict]:
+    monkeypatch.setenv("STUDIO_RUNS_DIR", str(tmp_path))
+    monkeypatch.setattr(
+        claude_agent_sdk,
+        "ClaudeSDKClient",
+        _make_fake_client_cls(raise_exception=raise_exception, captured_options=captured_options),
+    )
+    ws = _FakeWebSocket([json.dumps({
+        "type": "user_message",
+        "text": "hello",
+        "conversation_id": "conv1",
+    })])
+    asyncio.run(handle_ws(ws))
+    path = tmp_path / "chats" / "conv1.jsonl"
+    assert path.exists(), "transcript file was never written"
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+
+
+@pytest.mark.parametrize("raise_exception", [False, True])
+def test_assistant_text_flushed_before_error_event(tmp_path, monkeypatch, raise_exception) -> None:
+    events = _run_one_turn(tmp_path, monkeypatch, raise_exception=raise_exception)
+
+    assert events[0]["role"] == "user"
+    assistant_idx = next(i for i, e in enumerate(events) if e.get("role") == "assistant")
+    error_idx = next(i for i, e in enumerate(events) if e.get("type") == "error")
+    assert assistant_idx < error_idx, (
+        "assistant text must be appended to the transcript before the error "
+        "event — otherwise reload renders the error above the text that "
+        "chronologically preceded it"
+    )
+    assert events[assistant_idx]["text"] == "partial answer"
+    # Exactly one assistant-text event: the `finally` block's own flush must
+    # have been a no-op (assistant_chunks already cleared by the fix).
+    assert sum(1 for e in events if e.get("role") == "assistant") == 1
+
+
+# ---------------------------------------------------------------------------
+# A11: ClaudeAgentOptions must carry a max_turns circuit breaker.
+# ---------------------------------------------------------------------------
+
+
+def test_options_default_max_turns(tmp_path, monkeypatch) -> None:
+    monkeypatch.delenv("STUDIO_AGENT_MAX_TURNS", raising=False)
+    captured: list = []
+    _run_one_turn(tmp_path, monkeypatch, raise_exception=True, captured_options=captured)
+    assert captured[0].max_turns == 150
+
+
+def test_options_max_turns_env_override(tmp_path, monkeypatch) -> None:
+    monkeypatch.setenv("STUDIO_AGENT_MAX_TURNS", "42")
+    captured: list = []
+    _run_one_turn(tmp_path, monkeypatch, raise_exception=True, captured_options=captured)
+    assert captured[0].max_turns == 42

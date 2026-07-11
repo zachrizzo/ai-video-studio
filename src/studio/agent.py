@@ -562,6 +562,19 @@ async def handle_ws(websocket: WebSocket) -> None:
         runs_before_query = _snapshot_run_scripts()
         tool_names_by_id: dict[str, str] = {}
         assistant_chunks: list[str] = []
+
+        def _flush_assistant_text() -> None:
+            # Must run before any error event is appended: the transcript is
+            # append-only, so whichever event lands in the file first is what
+            # renders first on reload — streamed text belongs before the
+            # error that (chronologically) followed it.
+            if assistant_chunks:
+                transcripts.append_event(
+                    conversation_id,
+                    {"role": "assistant", "text": "".join(assistant_chunks)},
+                )
+                assistant_chunks.clear()
+
         client = ClaudeSDKClient(options)
         holder["client"] = client
         error_sent = False
@@ -699,6 +712,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                     # user-initiated stop also ends in an error result; skip it.
                     if event.is_error and not holder.get("stopped"):
                         message = event.result or f"agent turn failed ({event.subtype})"
+                        _flush_assistant_text()
                         transcripts.append_event(
                             conversation_id, {"type": "error", "message": message}
                         )
@@ -713,6 +727,7 @@ async def handle_ws(websocket: WebSocket) -> None:
 
         except Exception as exc:  # noqa: BLE001
             logger.exception("Error during Claude turn: %s", exc)
+            _flush_assistant_text()
             transcripts.append_event(
                 conversation_id, {"type": "error", "message": str(exc)}
             )
@@ -1066,6 +1081,9 @@ async def handle_ws(websocket: WebSocket) -> None:
                 skills="all",
                 include_partial_messages=True,
                 resume=requested_session_id,
+                # Circuit breaker, not a real budget: bounds a looping/confused
+                # agent turn server-side. Generous default; env-overridable.
+                max_turns=int(os.environ.get("STUDIO_AGENT_MAX_TURNS", "150")),
                 stderr=lambda line: logger.debug("agent stderr: %s", line),
                 hooks={
                     "PostToolUse": [

@@ -10,6 +10,8 @@ from __future__ import annotations
 
 import importlib.util
 import logging
+import re
+import shlex
 import shutil
 import socket
 import time
@@ -46,6 +48,29 @@ def _check_module(name: str) -> bool:
         return False
 
 
+_ENV_ASSIGNMENT_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
+
+
+def _check_align_command() -> bool:
+    """Probe the executable actually configured for alignment/QA transcription.
+
+    align_command (e.g. "PYENV_VERSION=3.11.13 whisper") may prefix the real
+    executable with shell env-var assignments; checking the literal string
+    "whisper" would misreport availability whenever this is overridden via
+    PTV_ALIGN_COMMAND.
+    """
+    try:
+        from src.config import PipelineConfig
+
+        tokens = shlex.split(PipelineConfig().align_command)
+        for token in tokens:
+            if not _ENV_ASSIGNMENT_RE.match(token):
+                return _check_which(token)
+        return False
+    except Exception:  # noqa: BLE001
+        return False
+
+
 def _check_ltx() -> bool:
     """LTX runs via the ltx-2-mlx CLI checked out at a fixed path; reuse the
     pipeline's own constant so this stays in sync with src/videogen/ltx.py."""
@@ -65,7 +90,7 @@ def probe(force: bool = False) -> dict[str, bool]:
         return _cache
     caps = {
         "voicebox": _check_voicebox(),
-        "whisper": _check_which("whisper"),
+        "whisper": _check_align_command(),
         "ffmpeg": _check_which("ffmpeg"),
         "mflux": _check_module("mflux"),
         "ltx": _check_ltx(),

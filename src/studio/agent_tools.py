@@ -145,7 +145,17 @@ async def create_run_tool(args: dict[str, Any]) -> dict[str, Any]:
     # (src.studio.runs._runs_root) — a stale hardcoded path here silently
     # creates runs the Studio UI's flow viewer can never find or display.
     code, out = await _run_pipeline("setup", [str(_runs_root())])
-    return _step_result("setup", code, out)
+    extra = None
+    if code == 0:
+        for line in reversed(out.strip().splitlines()):
+            try:
+                parsed = json.loads(line)
+            except (json.JSONDecodeError, ValueError):
+                continue
+            if isinstance(parsed, dict) and "run_id" in parsed:
+                extra = parsed
+            break
+    return _step_result("setup", code, out, extra=extra)
 
 
 def _simple_step(name: str, description: str, argv_builder):
@@ -258,7 +268,10 @@ def _filtered_step(name: str, description: str, force_env: str = ""):
 assets_tool = _filtered_step(
     "assets",
     "Generate CollageSpec assets (FLUX + optional cutouts) for collage segments. "
-    "segment_ids: optional comma-separated filter.",
+    "Skips assets that already exist; to regenerate failing segments (e.g. in a "
+    "QA fix loop) pass force=true with segment_ids. segment_ids: optional "
+    "comma-separated filter.",
+    force_env="PTV_IMAGE_FORCE",
 )
 
 collage_tool = _filtered_step(
@@ -289,8 +302,8 @@ async def imagegen_tool(args: dict[str, Any]) -> dict[str, Any]:
         argv.append(segment_ids)
     env = {
         "PTV_IMAGE_MODEL": args.get("model", ""),
-        "PTV_IMAGE_STEPS": str(args["steps"]) if args.get("steps") is not None else "",
-        "PTV_IMAGE_QUANTIZE": str(args["quantize"]) if args.get("quantize") is not None else "",
+        "PTV_IMAGE_STEPS": str(int(args["steps"])) if args.get("steps") is not None else "",
+        "PTV_IMAGE_QUANTIZE": str(int(args["quantize"])) if args.get("quantize") is not None else "",
     }
     if args.get("force"):
         env["PTV_IMAGE_FORCE"] = "true"
@@ -324,7 +337,7 @@ async def videogen_tool(args: dict[str, Any]) -> dict[str, Any]:
         argv.append(segment_ids)
     env = {"PTV_VIDEO_PROVIDER": args.get("video_provider", "")}
     if args.get("steps") is not None:
-        env["PTV_LTX_STEPS"] = str(args["steps"])
+        env["PTV_LTX_STEPS"] = str(int(args["steps"]))
     resolution = args.get("resolution", "")
     if resolution:
         split = split_resolution(resolution)

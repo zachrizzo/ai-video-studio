@@ -100,6 +100,49 @@ def test_probe_reprobes_after_ttl(monkeypatch) -> None:
     assert capabilities.probe()["voicebox"] is False
 
 
+def test_check_align_command_skips_env_assignments(monkeypatch) -> None:
+    """Regression: probing must resolve the CONFIGURED aligner, not a hardcoded
+    "whisper" — align_command may prefix the real executable with shell
+    env-var assignments (e.g. pyenv pinning)."""
+    from src.config import PipelineConfig
+
+    monkeypatch.setenv("PTV_ALIGN_COMMAND", "FOO=1 my-fake-whisper")
+    seen: list[str] = []
+
+    def fake_which(name: str) -> str | None:
+        seen.append(name)
+        return "/usr/bin/my-fake-whisper" if name == "my-fake-whisper" else None
+
+    monkeypatch.setattr(capabilities.shutil, "which", fake_which)
+    assert PipelineConfig().align_command == "FOO=1 my-fake-whisper"
+    assert capabilities._check_align_command() is True
+    assert seen == ["my-fake-whisper"]
+
+
+def test_check_align_command_all_assignments_is_false(monkeypatch) -> None:
+    monkeypatch.setenv("PTV_ALIGN_COMMAND", "FOO=1 BAR=2")
+    monkeypatch.setattr(capabilities.shutil, "which", lambda name: "/usr/bin/whatever")
+    assert capabilities._check_align_command() is False
+
+
+def test_check_align_command_missing_executable_is_false(monkeypatch) -> None:
+    monkeypatch.setenv("PTV_ALIGN_COMMAND", "FOO=1 my-fake-whisper")
+    monkeypatch.setattr(capabilities.shutil, "which", lambda name: None)
+    assert capabilities._check_align_command() is False
+
+
+def test_probe_whisper_key_uses_align_command(monkeypatch) -> None:
+    """The `whisper` key in probe()'s dict must reflect the configured
+    align_command, not a literal 'whisper' lookup."""
+    monkeypatch.setenv("PTV_ALIGN_COMMAND", "FOO=1 my-fake-whisper")
+    _patch_checks(monkeypatch, voicebox=True, which={"ffmpeg"}, modules={"mflux"}, ltx=True)
+    monkeypatch.setattr(
+        capabilities.shutil, "which",
+        lambda name: "/usr/bin/x" if name in {"ffmpeg", "my-fake-whisper"} else None,
+    )
+    assert capabilities.probe(force=True)["whisper"] is True
+
+
 def test_summary_line_format(monkeypatch) -> None:
     monkeypatch.setattr(
         capabilities, "probe",

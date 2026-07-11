@@ -94,6 +94,44 @@ def test_create_run_uses_the_real_runs_root(runs_root, fake_exec):
     assert calls[0]["argv"][-1] == str(runs_root)
 
 
+def test_create_run_parses_run_id_and_run_dir(runs_root, fake_exec):
+    """create_run's tool description promises run_id/run_dir; the underlying
+    cmd_setup prints them as a trailing JSON line — the tool must surface them,
+    not just wrap the raw output tail."""
+    payload_line = json.dumps({
+        "run_dir": str(runs_root / "run_abc123"),
+        "run_id": "run_abc123",
+        "audio_dir": str(runs_root / "run_abc123" / "audio"),
+        "video_dir": str(runs_root / "run_abc123" / "video"),
+        "scenes_dir": str(runs_root / "run_abc123" / "scenes"),
+    })
+    fake_exec(output=("some log noise\n" + payload_line + "\n").encode())
+    result = _call("create_run", {})
+    assert "is_error" not in result
+    payload = _payload(result)
+    assert payload["run_id"] == "run_abc123"
+    assert payload["run_dir"] == str(runs_root / "run_abc123")
+
+
+def test_create_run_falls_back_on_unparseable_output(runs_root, fake_exec):
+    """A malformed/non-JSON tail must not crash create_run — it just falls
+    back to today's plain wrapped-output behavior."""
+    fake_exec(output=b"not json at all\n")
+    result = _call("create_run", {})
+    assert "is_error" not in result
+    payload = _payload(result)
+    assert "run_id" not in payload
+    assert "not json at all" in payload["output"]
+
+
+def test_create_run_does_not_parse_output_on_nonzero_exit(runs_root, fake_exec):
+    payload_line = json.dumps({"run_dir": "x", "run_id": "run_xyz"})
+    fake_exec(returncode=1, output=(payload_line + "\n").encode())
+    result = _call("create_run", {})
+    assert result.get("is_error") is True
+    assert "run_id" not in _payload(result)
+
+
 def test_synthesize_builds_argv_and_env(run_dir, fake_exec):
     calls = fake_exec()
     result = _call(
@@ -154,6 +192,22 @@ def test_imagegen_builds_argv_and_env(run_dir, fake_exec):
     assert call["env"]["PTV_IMAGE_MODEL"] == "schnell"
     assert call["env"]["PTV_IMAGE_STEPS"] == "6"
     assert call["env"]["PTV_IMAGE_QUANTIZE"] == "8"
+
+
+def test_imagegen_float_steps_and_quantize_become_plain_ints(run_dir, fake_exec):
+    """Regression: a model-emitted 8.0/4.0 (JSON Schema 'number' accepts
+    floats) must not reach the subprocess as "8.0"/"4.0" — PipelineConfig's
+    int fields reject that and raise a validation error at startup."""
+    calls = fake_exec()
+    _call("imagegen", {"run_id": "run_abc123", "steps": 8.0, "quantize": 4.0})
+    assert calls[0]["env"]["PTV_IMAGE_STEPS"] == "8"
+    assert calls[0]["env"]["PTV_IMAGE_QUANTIZE"] == "4"
+
+
+def test_videogen_float_steps_becomes_plain_int(run_dir, fake_exec):
+    calls = fake_exec()
+    _call("videogen", {"run_id": "run_abc123", "steps": 40.0})
+    assert calls[0]["env"]["PTV_LTX_STEPS"] == "40"
 
 
 def test_videogen_passes_segment_ids_and_provider(run_dir, fake_exec):
@@ -264,6 +318,7 @@ def test_qa_success_also_includes_report(run_dir, fake_exec):
         ("imagegen", "PTV_IMAGE_FORCE"),
         ("videogen", "PTV_VIDEO_FORCE"),
         ("synthesize", "PTV_AUDIO_FORCE"),
+        ("assets", "PTV_IMAGE_FORCE"),
     ],
 )
 def test_force_param_sets_force_env(run_dir, fake_exec, monkeypatch, tool_name, env_var):
@@ -280,6 +335,7 @@ def test_force_param_sets_force_env(run_dir, fake_exec, monkeypatch, tool_name, 
         ("imagegen", "PTV_IMAGE_FORCE"),
         ("videogen", "PTV_VIDEO_FORCE"),
         ("synthesize", "PTV_AUDIO_FORCE"),
+        ("assets", "PTV_IMAGE_FORCE"),
     ],
 )
 def test_no_force_param_leaves_env_unset(run_dir, fake_exec, monkeypatch, tool_name, env_var):
@@ -287,6 +343,18 @@ def test_no_force_param_leaves_env_unset(run_dir, fake_exec, monkeypatch, tool_n
     calls = fake_exec()
     _call(tool_name, {"run_id": "run_abc123"})
     assert env_var not in calls[0]["env"]
+
+
+def test_assets_force_env_description_documents_regeneration(run_dir, fake_exec):
+    assert "force=true" in agent_tools.assets_tool.description
+
+
+def test_collage_tool_has_no_force_param():
+    """run_collage (src/collage/cmd.py) unconditionally re-renders every
+    segment on every call — no skip-if-exists check exists to override, so a
+    force param here would be a dead no-op. Intentionally not added; see the
+    WP6 report for the investigation."""
+    assert "force" not in agent_tools.collage_tool.input_schema.get("properties", {})
 
 
 def test_qa_strict_flag(run_dir, fake_exec):
