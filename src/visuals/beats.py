@@ -243,19 +243,17 @@ def ltx_motion_prompt(beat: SegmentVisualBeat) -> str:
     """
     shot = beat.shot_type or "stable shot"
     composition = beat.composition or "the exact layout of the reference image"
-    action = beat.action or "subtle natural motion implied by the still image"
-    camera = beat.camera_motion or "a steady hold with only minimal camera movement"
+    action = beat.action or "dynamic motion that brings the subject to life"
+    camera = beat.camera_motion or "smooth, expressive camera movement"
 
     parts = [
-        "A clean coherent image-to-video shot continues from the provided still image.",
+        "Animate the provided still image into a living shot.",
         f"Keep it as a {shot} with {composition}.",
-        f"The only subject motion is: {action}.",
-        f"The camera performs: {camera}.",
+        f"Bring this action to life: {action}.",
+        f"Camera: {camera}.",
         "Preserve the original character identity, pose language, line thickness, color palette, and layout.",
-        "Static background elements, props, filled silhouettes, land, sky, and architecture remain locked in place unless the action explicitly moves them.",
-        "Filled shapes stay clean, simple, and solid with stable edges.",
+        "Avoid frozen subjects: the subject visibly moves through the described action while the drawing style stays consistent.",
         "The frame stays simple and uncluttered, matching the source image.",
-        "Use small readable motion while keeping the drawing structure stable.",
     ]
     if beat.description:
         parts.append(f"Story beat: {beat.description}.")
