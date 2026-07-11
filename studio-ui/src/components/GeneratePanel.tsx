@@ -1,5 +1,9 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { TTS_LANGUAGES, TTS_SPEAKERS } from '../constants'
+import {
+  EXTEND_CONTEXT_MAP, EXTEND_MODE_MAP, GEN_TYPE_TO_MODE, MODEL_MAP,
+  RETAKE_MODE_MAP, TTS_LANGUAGES, TTS_SPEAKERS,
+} from '../constants'
+import { parseTimecode } from './formatters'
 import '../styles/generate-panel.css'
 
 /* ── Types ─────────────────────────────────────────────────────────────────── */
@@ -30,6 +34,15 @@ interface FileUpload {
 
 const API = '' // proxied via vite
 
+// The backend never returns a `mode` field — it returns canonical `type`
+// (e.g. "image"/"video" from the chat agent's classic generate tools, or the
+// GenMode-shaped ids like "text-to-video" from every other one-shot path).
+// Every ingestion point (poll + gallery load) must derive `mode` from it.
+function toGeneration(raw: Record<string, unknown>): Generation {
+  const type = String(raw.type ?? '')
+  return { ...raw, mode: (GEN_TYPE_TO_MODE[type] ?? type) as GenMode } as Generation
+}
+
 const MODES: { key: GenMode; label: string; icon: React.ReactNode }[] = [
   { key: 'text-to-image', label: 'Text to Image', icon: <ImageGenIcon /> },
   { key: 'text-to-speech', label: 'Text to Speech', icon: <SpeechIcon /> },
@@ -49,6 +62,11 @@ const SIDEBAR_GROUPS = [
 ]
 
 const LOCAL_MODES: GenMode[] = ['text-to-image', 'text-to-speech', 'text-to-video', 'image-to-video', 'audio-to-video', 'retake', 'extend']
+
+// Modes with a working cloud path (LTX Cloud). text-to-image/text-to-speech
+// have no `backend`/`api_key` field in their request models at all, so the
+// "Run on: Local / Cloud API" toggle is meaningless for them.
+const CLOUD_CAPABLE_MODES: GenMode[] = ['text-to-video', 'image-to-video', 'audio-to-video', 'retake', 'extend', 'video-hdr']
 
 const TTS_MODELS = ['0.6B (Fast)', '1.7B (Quality)']
 
@@ -129,13 +147,47 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
   // HDR
   const [hdrVideo, setHdrVideo] = useState<FileUpload | null>(null)
 
-  // Poll generation until done/failed
-  const pollGeneration = useCallback((genId: string) => {
+  // Poll generation until done/failed. fallbackMode is used only if the
+  // gen_id never resolves (404s out) and we have to synthesize a failed
+  // Generation without ever having seen the backend's real `type`.
+  const pollGeneration = useCallback((genId: string, fallbackMode: GenMode) => {
+    let consecutiveNotFound = 0
+    const stop = (interval: number) => {
+      window.clearInterval(interval)
+      pollRef.current.delete(genId)
+      if (pollRef.current.size === 0) setGenerating(false)
+    }
     const interval = window.setInterval(async () => {
       try {
         const r = await fetch(`${API}/api/generate/${genId}`)
+        if (r.status === 404) {
+          consecutiveNotFound += 1
+          // ~30s of 404s (1.5s tick) means this gen_id will never resolve —
+          // stop polling instead of spinning forever (previously the classic
+          // /api/generate/undefined case when a POST never returned an id).
+          if (consecutiveNotFound >= 20) {
+            const error = 'Generation not found — it may have failed to start.'
+            setGenerations(prev => {
+              const idx = prev.findIndex(g => g.id === genId)
+              if (idx >= 0) {
+                const next = [...prev]
+                next[idx] = { ...next[idx], status: 'failed', error }
+                return next
+              }
+              const failed: Generation = {
+                id: genId, mode: fallbackMode, status: 'failed', prompt: '',
+                created_at: Date.now() / 1000, output_url: null, error,
+              }
+              return [failed, ...prev]
+            })
+            setSelectedGen(prev => (prev?.id === genId ? { ...prev, status: 'failed', error } : prev))
+            stop(interval)
+          }
+          return
+        }
         if (!r.ok) return
-        const gen: Generation = await r.json()
+        consecutiveNotFound = 0
+        const gen = toGeneration(await r.json())
         setGenerations(prev => {
           const idx = prev.findIndex(g => g.id === genId)
           if (idx >= 0) {
@@ -146,9 +198,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
           return [gen, ...prev]
         })
         if (gen.status === 'done' || gen.status === 'failed') {
-          window.clearInterval(interval)
-          pollRef.current.delete(genId)
-          if (pollRef.current.size === 0) setGenerating(false)
+          stop(interval)
           if (gen.status === 'done') setSelectedGen(gen)
         }
       } catch { /* retry next tick */ }
@@ -161,12 +211,13 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     fetch(`${API}/api/generations`)
       .then(r => r.json())
       .then(data => {
-        const gens: Generation[] = data.generations || []
+        const raw: Record<string, unknown>[] = data.generations || []
+        const gens = raw.map(toGeneration)
         setGenerations(gens)
         const inProgress = gens.filter(g => g.status === 'generating')
         if (inProgress.length > 0) {
           setGenerating(true)
-          inProgress.forEach(g => pollGeneration(g.id))
+          inProgress.forEach(g => pollGeneration(g.id, g.mode))
         }
       })
       .catch(() => {})
@@ -264,13 +315,16 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
   // Generate
   const handleGenerate = useCallback(async () => {
     if (generating) return
-    if (backend === 'cloud' && !apiKey.trim()) return
+    const modeSupportsCloud = CLOUD_CAPABLE_MODES.includes(mode)
+    if (modeSupportsCloud && backend === 'cloud' && !apiKey.trim()) return
 
     let endpoint = ''
     let body: Record<string, unknown> = { backend }
-    if (backend === 'cloud') {
+    if (modeSupportsCloud && backend === 'cloud') {
       body.api_key = apiKey.trim()
     }
+
+    const mappedModel = MODEL_MAP[model] || model
 
     switch (mode) {
       case 'text-to-image':
@@ -296,7 +350,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         body = {
           ...body,
           prompt: prompt.trim(),
-          model,
+          model: mappedModel,
           duration: parseDuration(duration),
           resolution: parseResolution(resolution),
           fps: parseFps(fps),
@@ -311,7 +365,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
           ...body,
           image_path: firstFrame.path,
           prompt: prompt.trim(),
-          model,
+          model: mappedModel,
           duration: parseDuration(duration),
           resolution: parseResolution(resolution),
           fps: parseFps(fps),
@@ -324,11 +378,11 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         endpoint = '/api/generate/audio-to-video'
         body = {
           ...body,
-          audio_path: audioFile.path,
-          image_path: imageFile?.path || null,
+          audio_uri: audioFile.path,
+          image_uri: imageFile?.path || null,
           prompt: prompt.trim(),
-          model,
-          resolution,
+          model: mappedModel,
+          resolution: parseResolution(resolution),
           guidance_scale: guidanceScale,
         }
         break
@@ -337,13 +391,13 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         endpoint = '/api/generate/retake'
         body = {
           ...body,
-          video_path: retakeVideo.path,
-          start_time: startTime,
-          duration: retakeDuration,
+          video_uri: retakeVideo.path,
+          start_time: parseTimecode(startTime),
+          duration: parseTimecode(retakeDuration),
           prompt: prompt.trim(),
-          model,
-          resolution,
-          mode: retakeMode,
+          model: mappedModel,
+          resolution: parseResolution(resolution),
+          mode: RETAKE_MODE_MAP[retakeMode] || retakeMode,
         }
         break
       case 'extend':
@@ -351,18 +405,18 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         endpoint = '/api/generate/extend'
         body = {
           ...body,
-          video_path: extendVideo.path,
+          video_uri: extendVideo.path,
           prompt: prompt.trim(),
-          model,
-          mode: extendMode,
-          duration: extendDuration,
-          context: extendContext,
+          model: mappedModel,
+          mode: EXTEND_MODE_MAP[extendMode] || extendMode,
+          duration: parseTimecode(extendDuration),
+          context: EXTEND_CONTEXT_MAP[extendContext] ?? null,
         }
         break
       case 'video-hdr':
         if (!hdrVideo?.path) return
         endpoint = '/api/generate/video-hdr'
-        body = { ...body, video_path: hdrVideo.path }
+        body = { ...body, video_uri: hdrVideo.path }
         break
     }
 
@@ -373,7 +427,37 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
       })
+      if (!r.ok) {
+        let detail = `Request failed (${r.status})`
+        try {
+          const errBody = await r.json()
+          if (typeof errBody?.detail === 'string') {
+            detail = errBody.detail
+          } else if (Array.isArray(errBody?.detail)) {
+            // FastAPI 422 validation errors: [{loc, msg, type}, ...]
+            const msgs = errBody.detail.map((d: { msg?: string }) => d.msg).filter(Boolean)
+            if (msgs.length) detail = msgs.join('; ')
+          }
+        } catch { /* non-JSON error body, keep default detail */ }
+        const failed: Generation = {
+          id: `local-${Date.now()}`,
+          mode,
+          status: 'failed',
+          prompt: prompt.trim(),
+          created_at: Date.now() / 1000,
+          output_url: null,
+          error: detail,
+        }
+        setGenerations(prev => [failed, ...prev])
+        setSelectedGen(failed)
+        setGenerating(false)
+        return
+      }
       const { id } = await r.json()
+      if (!id) {
+        setGenerating(false)
+        return
+      }
       const placeholder: Generation = {
         id,
         mode,
@@ -384,7 +468,7 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         error: null,
       }
       setGenerations(prev => [placeholder, ...prev])
-      pollGeneration(id)
+      pollGeneration(id, mode)
     } catch {
       setGenerating(false)
     }
@@ -395,8 +479,9 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
     extendVideo, extendMode, extendDuration, extendContext, hdrVideo, pollGeneration,
   ])
 
+  const modeSupportsCloud = CLOUD_CAPABLE_MODES.includes(mode)
   const isLocalUnavailable = backend === 'local' && !LOCAL_MODES.includes(mode)
-  const needsApiKey = backend === 'cloud' && !apiKey.trim()
+  const needsApiKey = modeSupportsCloud && backend === 'cloud' && !apiKey.trim()
 
   const canGenerate = (() => {
     if (generating || isLocalUnavailable || needsApiKey) return false
@@ -443,40 +528,45 @@ export function GeneratePanel({ style }: { style?: React.CSSProperties }) {
         </div>
 
         <div className="gen-form-scroll">
-          {/* Backend selector */}
-          <div className="gen-backend">
-            <div className="gen-backend-row">
-              <span className="field-label">Run on</span>
-              <div className="gen-toggle-group">
-                <button
-                  className={`gen-toggle-btn ${backend === 'local' ? 'active' : ''}`}
-                  onClick={() => setBackend('local')}
-                >
-                  Local
-                </button>
-                <button
-                  className={`gen-toggle-btn ${backend === 'cloud' ? 'active' : ''}`}
-                  onClick={() => setBackend('cloud')}
-                >
-                  Cloud API
-                </button>
+          {/* Backend selector — hidden for modes with no cloud path at all
+              (text-to-image/text-to-speech have no backend/api_key field). */}
+          {modeSupportsCloud && (
+            <>
+              <div className="gen-backend">
+                <div className="gen-backend-row">
+                  <span className="field-label">Run on</span>
+                  <div className="gen-toggle-group">
+                    <button
+                      className={`gen-toggle-btn ${backend === 'local' ? 'active' : ''}`}
+                      onClick={() => setBackend('local')}
+                    >
+                      Local
+                    </button>
+                    <button
+                      className={`gen-toggle-btn ${backend === 'cloud' ? 'active' : ''}`}
+                      onClick={() => setBackend('cloud')}
+                    >
+                      Cloud API
+                    </button>
+                  </div>
+                </div>
+                {backend === 'cloud' && (
+                  <div className="field">
+                    <label className="field-label">API key</label>
+                    <input
+                      type="password"
+                      className="input gen-mono"
+                      value={apiKey}
+                      onChange={e => setApiKey(e.target.value)}
+                      placeholder="Paste your LTX Cloud API key"
+                    />
+                  </div>
+                )}
               </div>
-            </div>
-            {backend === 'cloud' && (
-              <div className="field">
-                <label className="field-label">API key</label>
-                <input
-                  type="password"
-                  className="input gen-mono"
-                  value={apiKey}
-                  onChange={e => setApiKey(e.target.value)}
-                  placeholder="Paste your LTX Cloud API key"
-                />
-              </div>
-            )}
-          </div>
 
-          <hr className="divider" />
+              <hr className="divider" />
+            </>
+          )}
 
           {isLocalUnavailable ? (
             <div className="empty-state">
