@@ -306,3 +306,70 @@ def test_start_run_production_no_preset_no_snapshot_is_unchanged(run_dir, monkey
     assert _wait_until(lambda: producer.get_run_production_status("run_abc123")["status"] != "running")
     assert not (run_dir / producer.PRESET_SNAPSHOT_FILE).exists()
     assert envs and "PTV_VOICE_PROVIDER" not in envs[0]
+
+
+def _start_fake_active_job(run_id: str) -> producer.ProductionJob:
+    """Register a still-alive job in _ACTIVE without touching disk, so the
+    already-active no-op branch of start_run_production is exercised without
+    a real subprocess or thread race."""
+    ready = threading.Event()
+    stop = threading.Event()
+
+    def alive_forever():
+        ready.set()
+        stop.wait()
+
+    thread = threading.Thread(target=alive_forever, daemon=True)
+    job = producer.ProductionJob(run_id=run_id, thread=thread)
+    thread.start()
+    ready.wait(timeout=5)
+    producer._ACTIVE[run_id] = job
+    job.stop_event = stop  # reuse as our own stop switch to end the thread later
+    return job
+
+
+def test_start_run_production_already_active_does_not_touch_preset_snapshot(
+    run_dir, monkeypatch
+):
+    """Regression: calling start_run_production with a preset_id while a job
+    for this run is already active must be a true no-op — it must not
+    overwrite (or create) .production_preset.json, since the already-running
+    job's env was already built from whatever preset existed when its own
+    thread started."""
+    fake_preset = {"id": "cinematic_documentary", "builtin": True, "tts_provider": "voicebox"}
+    monkeypatch.setattr(
+        producer.presets, "get_preset",
+        lambda pid: fake_preset if pid == "cinematic_documentary" else None,
+    )
+
+    snapshot_path = run_dir / producer.PRESET_SNAPSHOT_FILE
+    assert not snapshot_path.exists()
+
+    job = _start_fake_active_job("run_abc123")
+    try:
+        status = producer.start_run_production("run_abc123", preset_id="cinematic_documentary")
+        assert status["status"] != "failed"
+        assert not snapshot_path.exists(), "no-op call must not write a preset snapshot"
+    finally:
+        job.stop_event.set()
+        job.thread.join(timeout=5)
+        producer._ACTIVE.pop("run_abc123", None)
+
+
+def test_start_run_production_already_active_unknown_preset_id_does_not_raise(
+    run_dir, monkeypatch
+):
+    """Regression: an unknown preset_id passed alongside an already-active job
+    must not raise — the call never reaches preset resolution because it's a
+    no-op that just returns the existing job's status."""
+    monkeypatch.setattr(producer.presets, "get_preset", lambda pid: None)
+
+    job = _start_fake_active_job("run_abc123")
+    try:
+        status = producer.start_run_production("run_abc123", preset_id="does_not_exist")
+        assert status["status"] != "failed"
+        assert not (run_dir / producer.PRESET_SNAPSHOT_FILE).exists()
+    finally:
+        job.stop_event.set()
+        job.thread.join(timeout=5)
+        producer._ACTIVE.pop("run_abc123", None)

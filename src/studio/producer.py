@@ -466,11 +466,16 @@ def start_run_production(
     segment_ids = ",".join(item.strip() for item in segment_ids.split(",") if item.strip())
     # Validate before creating a thread/status file.
     steps = _pipeline_steps(run_dir, mode, segment_ids)
-    preset = _resolve_production_preset(run_dir, preset_id)
 
+    # Must run before preset resolution: an already-running job's produce-again
+    # call is a documented no-op, so it must not snapshot a new preset to disk
+    # (which the running job's env never picked up) or raise on an unknown
+    # preset_id it will never use.
     active = _ACTIVE.get(run_id)
     if active and active.thread.is_alive():
         return get_run_production_status(run_id)
+
+    preset = _resolve_production_preset(run_dir, preset_id)
 
     job_ref: dict[str, ProductionJob] = {}
     thread = threading.Thread(
