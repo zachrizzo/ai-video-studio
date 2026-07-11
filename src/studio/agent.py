@@ -122,7 +122,10 @@ def _detach_turn(conversation_id: str, turn: dict[str, Any]) -> None:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("grace-window interrupt failed: %s", exc)
             try:
-                await asyncio.wait_for(task, timeout=15)
+                # Bounded, not zero-wait: a still-running old-session CLI
+                # process racing a new turn's resume=session_id on the same
+                # Claude session is a real risk worth a short wait to avoid.
+                await asyncio.wait_for(task, timeout=2)
             except Exception:  # noqa: BLE001
                 task.cancel()
                 try:
@@ -155,7 +158,10 @@ async def _interrupt_detached_turn(turn: dict[str, Any]) -> None:
         except Exception as exc:  # noqa: BLE001
             logger.warning("interrupt of detached turn failed: %s", exc)
     try:
-        await asyncio.wait_for(turn["task"], timeout=15)
+        # Bounded, not zero-wait: a still-running old-session CLI process
+        # racing a new turn's resume=session_id on the same Claude session is
+        # a real risk worth a short wait to avoid.
+        await asyncio.wait_for(turn["task"], timeout=2)
     except Exception:  # noqa: BLE001
         turn["task"].cancel()
         try:
@@ -219,7 +225,10 @@ segments skip both steps automatically).
   production in the background; poll production_status(run_id). Use it when the
   user asks to continue/resume/finish a run that already has script.json. mode
   "videos" preserves images and redoes clips onward; "clips" + segment_ids repairs
-  selected clips only.
+  selected clips only. stop_production(run_id) halts a running produce_run job
+  (idempotent — a no-op if nothing is running); this is distinct from the
+  chat's own Stop control, which only interrupts this conversation's in-flight
+  tool calls and has no effect on a produce_run job running in the background.
 - One-shot tools for quick standalone media (no run needed): generate_image,
   generate_video, retake_video, extend_video, video_hdr, tts. Poll
   generation_status(gen_id); list_generations shows recent ones. Never refuse a

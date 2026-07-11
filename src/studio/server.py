@@ -13,6 +13,7 @@ Run via:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import uuid
@@ -29,6 +30,7 @@ from src.studio.producer import (
     _pipeline_steps,
     get_run_production_status,
     start_run_production,
+    stop_run_production,
 )
 from src.studio.agent import handle_ws
 from src.studio.presets import list_presets, get_preset, save_preset, delete_preset
@@ -404,6 +406,22 @@ async def api_start_run_production(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+@app.post("/api/runs/{run_id}/produce/stop")
+async def api_stop_run_production(run_id: str) -> dict:
+    """Stop background production for a run (idempotent no-op if not running).
+
+    stop_run_production can block for several seconds killing the process
+    group and joining the producer thread — run it off the event loop so it
+    doesn't freeze WS streaming or other concurrent requests.
+    """
+    try:
+        return await asyncio.to_thread(stop_run_production, run_id)
+    except FileNotFoundError:
+        raise HTTPException(status_code=404, detail=f"Run '{run_id}' not found") from None
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
 @app.get("/api/pipeline-steps")
 async def api_pipeline_steps() -> dict:
     """Ordered production step ids/labels per mode, straight from the producer.
@@ -486,9 +504,13 @@ async def api_list_generations() -> dict:
 
 @app.delete("/api/generate/{gen_id}")
 async def api_delete_generation(gen_id: str) -> dict:
-    """Delete a generation and its files. Also kills any running subprocess."""
+    """Delete a generation and its files. Also kills any running subprocess.
+
+    Runs off the event loop: this does a blocking pgrep + shutil.rmtree that
+    would otherwise freeze WS streaming and other concurrent requests.
+    """
     from src.studio.generate import delete_generation
-    ok = delete_generation(gen_id)
+    ok = await asyncio.to_thread(delete_generation, gen_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Generation '{gen_id}' not found")
     return {"deleted": True}
@@ -496,9 +518,14 @@ async def api_delete_generation(gen_id: str) -> dict:
 
 @app.post("/api/generate/{gen_id}/stop")
 async def api_stop_generation(gen_id: str) -> dict:
-    """Stop a running generation and delete it."""
+    """Stop a running generation and delete it.
+
+    Runs off the event loop: this does two blocking pgrep calls (5s timeout
+    each) plus shutil.rmtree that would otherwise freeze WS streaming and
+    other concurrent requests.
+    """
     from src.studio.generate import stop_generation
-    ok = stop_generation(gen_id)
+    ok = await asyncio.to_thread(stop_generation, gen_id)
     if not ok:
         raise HTTPException(status_code=404, detail=f"Generation '{gen_id}' not found")
     return {"stopped": True}

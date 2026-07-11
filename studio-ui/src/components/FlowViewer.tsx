@@ -1,6 +1,6 @@
 import { Fragment, useEffect, useState, useCallback, useRef } from 'react'
 import '../styles/flow-viewer.css'
-import { fetchRuns, fetchRun, startRunProduction } from '../api'
+import { fetchRuns, fetchRun, startRunProduction, stopRunProduction } from '../api'
 import type {
   RunSummary,
   RunDetail,
@@ -117,7 +117,10 @@ function derivePipeline(
     }
   }
 
-  const broken = production.status === 'failed' || production.status === 'stalled'
+  const broken =
+    production.status === 'failed' ||
+    production.status === 'stalled' ||
+    production.status === 'stopped'
   const stages: StageView[] = []
   steps.forEach((step, i) => {
     const stageKey =
@@ -151,6 +154,7 @@ function ProductionProgress({
   const pipeline = derivePipeline(production, pipelineSteps)
   const running = production.status === 'running'
   const stalled = production.status === 'stalled'
+  const stopped = production.status === 'stopped'
   const progress = Math.min(Math.max(Math.round(production.progress), 0), 100)
 
   const note = running
@@ -159,7 +163,9 @@ function ProductionProgress({
       : `${production.step_label}… ${progress}%`
     : stalled
       ? 'Production paused before finishing — press Resume to pick up where it left off.'
-      : `Production hit a problem${production.error ? `: ${production.error}` : ''}`
+      : stopped
+        ? 'Production stopped — press Resume to continue from where it left off.'
+        : `Production hit a problem${production.error ? `: ${production.error}` : ''}`
 
   return (
     <div className={`production-strip ${production.status}`} role="status">
@@ -225,6 +231,8 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
   const [detailError, setDetailError] = useState<string | null>(null)
   const [produceBusy, setProduceBusy] = useState(false)
   const [produceError, setProduceError] = useState<string | null>(null)
+  const [stopBusy, setStopBusy] = useState(false)
+  const [stopError, setStopError] = useState<string | null>(null)
   const [speed, setSpeed] = useState(1)
   const [pipelineSteps, setPipelineSteps] = useState<PipelineStepsByMode | null>(null)
   const selectedIdRef = useRef<string | null>(null)
@@ -371,6 +379,28 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
       .finally(() => setProduceBusy(false))
   }
 
+  function handleStop() {
+    if (!selectedId) return
+    const runId = selectedId
+    setStopBusy(true)
+    setStopError(null)
+    stopRunProduction(runId)
+      .then((production) => {
+        setDetail((current) => (
+          current && current.id === production.run_id
+            ? { ...current, production }
+            : current
+        ))
+        loadDetail(runId, false)
+        fetchRuns().then(setRuns).catch(() => {})
+      })
+      .catch((e: unknown) => {
+        const msg = e instanceof Error ? e.message : String(e)
+        setStopError(msg)
+      })
+      .finally(() => setStopBusy(false))
+  }
+
   // ── Computed ──────────────────────────────────────────────────────────────
   const doneCount = detail
     ? detail.segments.filter((s) => s.status === 'done' || s.status === 'approved').length
@@ -379,7 +409,10 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
   const totalCount = detail ? detail.segments.length : 0
   const production = detail?.production ?? null
   const isProducing = production?.status === 'running'
-  const productionNeedsAction = production?.status === 'failed' || production?.status === 'stalled'
+  const productionNeedsAction =
+    production?.status === 'failed' ||
+    production?.status === 'stalled' ||
+    production?.status === 'stopped'
   const showProduceButton = Boolean(
     detail && selectedId && (isProducing || productionNeedsAction || !detail.final_video_url)
   )
@@ -442,8 +475,24 @@ export function FlowViewer({ artifactRefreshRunId, currentProjectId, onRunIdChan
                 Couldn't start: {produceError}
               </span>
             )}
+            {stopError && (
+              <span className="flow-error-note" title={stopError}>
+                Couldn't stop: {stopError}
+              </span>
+            )}
             {showDoneBadge && (
               <span className="badge badge-success">{production?.step_label || 'Done'}</span>
+            )}
+            {isProducing && (
+              <button
+                className="btn btn-danger btn-sm"
+                onClick={handleStop}
+                disabled={stopBusy}
+                title="Stop the running production"
+              >
+                {stopBusy && <span className="spinner" />}
+                Stop
+              </button>
             )}
             {(showProduceButton || showRerunVideosButton) && !isProducing && (
               <select

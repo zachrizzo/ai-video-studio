@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,12 @@ _STATUS_LOCK = threading.Lock()
 _ACTIVE: dict[str, "ProductionJob"] = {}
 
 
+class ProductionStopped(Exception):
+    """Raised by _run_command when a step's process was killed by a deliberate
+    stop_run_production call, so _run_production reports "stopped" instead of
+    treating the resulting nonzero exit code as a genuine failure."""
+
+
 @dataclass
 class ProductionJob:
     run_id: str
@@ -30,6 +37,7 @@ class ProductionJob:
     force_video: bool = False
     segment_ids: str = ""
     process: subprocess.Popen[str] | None = None
+    stop_event: threading.Event = field(default_factory=threading.Event)
 
 
 def _now() -> float:
@@ -160,6 +168,36 @@ def _append_log(status: dict[str, Any], line: str) -> None:
             del logs[:-200]
 
 
+def _kill_process_group(proc: subprocess.Popen[str]) -> None:
+    """SIGTERM the process group led by `proc`, escalating to SIGKILL if it
+    hasn't exited within 5s. `start_new_session=True` on the child makes its
+    pid equal its pgid, so this reaps the whole tree the pipeline CLI spawns
+    (mflux/ffmpeg/LTX subprocesses), not just the immediate child. SIGTERM
+    first: pipeline steps hold the cross-process generation lock and should
+    release it cleanly if they can.
+    """
+    if proc.poll() is not None:
+        return
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        proc.wait(timeout=5)
+        return
+    except subprocess.TimeoutExpired:
+        pass
+    if proc.poll() is None:
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        try:
+            proc.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+
+
 def _run_command(
     *,
     run_dir: Path,
@@ -193,6 +231,7 @@ def _run_command(
         stderr=subprocess.STDOUT,
         text=True,
         bufsize=1,
+        start_new_session=True,
     )
     job.process = proc
 
@@ -204,17 +243,14 @@ def _run_command(
 
         return_code = proc.wait()
     except BaseException:
-        if proc.poll() is None:
-            proc.kill()
-        try:
-            proc.wait(timeout=10)
-        except subprocess.TimeoutExpired:
-            pass
+        _kill_process_group(proc)
         raise
     finally:
         job.process = None
 
     if return_code != 0:
+        if job.stop_event.is_set():
+            raise ProductionStopped(f"{step_label} stopped (exit code {return_code})")
         raise RuntimeError(f"{step_label} failed with exit code {return_code}")
 
 
@@ -303,7 +339,13 @@ def _run_production(
 
     try:
         job = job_ref["job"]
+        stopped = False
         for index, (step, label, args) in enumerate(steps, start=1):
+            if job.stop_event.is_set():
+                # Covers the gap between steps, when job.process is None and
+                # _run_command has no process to kill.
+                stopped = True
+                break
             _run_command(
                 run_dir=run_dir,
                 job=job,
@@ -316,19 +358,42 @@ def _run_production(
                 env=env,
             )
 
-        final_path = run_dir / "final.mp4"
-        done_label = "Clips ready" if mode == "clips" else "Done"
+        if stopped:
+            status.update(
+                {
+                    "status": "stopped",
+                    "step_label": "Stopped",
+                    "error": None,
+                    "finished_at": _now(),
+                }
+            )
+            _append_log(status, "Stopped by user request.")
+            _write_status(run_dir, status)
+        else:
+            final_path = run_dir / "final.mp4"
+            done_label = "Clips ready" if mode == "clips" else "Done"
+            status.update(
+                {
+                    "status": "done",
+                    "step": "done",
+                    "step_label": done_label,
+                    "progress": 100,
+                    "finished_at": _now(),
+                    "error": None,
+                    "final_video_url": f"/media/{run_id}/final.mp4" if final_path.exists() else None,
+                }
+            )
+            _write_status(run_dir, status)
+    except ProductionStopped:
         status.update(
             {
-                "status": "done",
-                "step": "done",
-                "step_label": done_label,
-                "progress": 100,
-                "finished_at": _now(),
+                "status": "stopped",
+                "step_label": "Stopped",
                 "error": None,
-                "final_video_url": f"/media/{run_id}/final.mp4" if final_path.exists() else None,
+                "finished_at": _now(),
             }
         )
+        _append_log(status, "Stopped by user request.")
         _write_status(run_dir, status)
     except Exception as exc:  # noqa: BLE001
         status.update(
@@ -384,4 +449,27 @@ def start_run_production(
     _ACTIVE[run_id] = job
     _write_status(run_dir, _initial_status(run_id, len(steps), mode, force_video, segment_ids))
     thread.start()
+    return get_run_production_status(run_id)
+
+
+def stop_run_production(run_id: str) -> dict[str, Any]:
+    """Stop an active production job for a run.
+
+    Idempotent: calling this when nothing is running (already stopped/done/
+    never started) is a no-op that just returns the current status, not an
+    error — a stop button double-click or a retry must never raise.
+    """
+    run_dir = _safe_run_dir(run_id)
+    if not run_dir.is_dir() or not (run_dir / "script.json").exists():
+        raise FileNotFoundError(run_id)
+
+    job = _ACTIVE.get(run_id)
+    if job is None or not job.thread.is_alive():
+        return get_run_production_status(run_id)
+
+    job.stop_event.set()
+    proc = job.process
+    if proc is not None:
+        _kill_process_group(proc)
+    job.thread.join(timeout=15)
     return get_run_production_status(run_id)

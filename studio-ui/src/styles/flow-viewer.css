@@ -133,6 +133,7 @@
 
 .production-strip.failed .production-note { color: var(--red); }
 .production-strip.stalled .production-note { color: var(--amber); }
+.production-strip.stopped .production-note { color: var(--amber); }
 
 .production-bar {
   height: 3px;
@@ -150,10 +151,13 @@
 
 .production-strip.failed .production-bar-fill { background: var(--red); }
 .production-strip.stalled .production-bar-fill { background: var(--amber); }
+.production-strip.stopped .production-bar-fill { background: var(--amber); }
 
-/* A stalled run is paused, not broken — soften the halted stage chip to amber. */
+/* A stalled/stopped run is paused, not broken — soften the halted stage chip to amber. */
 .production-strip.stalled .stepper-step.failed { color: var(--amber); }
 .production-strip.stalled .stepper-step.failed .stepper-step-dot { background: var(--amber); }
+.production-strip.stopped .stepper-step.failed { color: var(--amber); }
+.production-strip.stopped .stepper-step.failed .stepper-step-dot { background: var(--amber); }
 
 /* ── Final Video Player ────────────────────────────────────────────────────── */
 .final-video-wrap {

@@ -314,3 +314,9 @@ export async function startRunProduction(
     body: options ? JSON.stringify(options) : undefined,
   })
 }
+
+export async function stopRunProduction(runId: string): Promise<RunProductionStatus> {
+  return apiFetch<RunProductionStatus>(`/api/runs/${runId}/produce/stop`, {
+    method: 'POST',
+  })
+}

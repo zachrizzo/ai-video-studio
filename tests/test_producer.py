@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import os
 import threading
+import time
 
 import pytest
 
@@ -113,3 +115,71 @@ def test_production_env_passes_through_explicit_provider(run_dir, monkeypatch):
     monkeypatch.setenv("PTV_VIDEO_PROVIDER", "kenburns")
     envs = _capture_production_envs(monkeypatch, run_dir)
     assert envs and all(env["PTV_VIDEO_PROVIDER"] == "kenburns" for env in envs)
+
+
+# ---------------------------------------------------------------------------
+# stop_run_production — real subprocess, real process group
+# ---------------------------------------------------------------------------
+
+
+def _wait_until(predicate, timeout=5.0, interval=0.05):
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if predicate():
+            return True
+        time.sleep(interval)
+    return predicate()
+
+
+def test_stop_run_production_stops_running_job(run_dir, monkeypatch, tmp_path):
+    """stop_run_production must: report status "stopped" (not "failed"),
+    remove the job from _ACTIVE, actually kill the running subprocess *and*
+    its own child (standing in for the pipeline CLI's mflux/ffmpeg/LTX
+    subprocess), be idempotent on a second call, and leave start_run_production
+    able to start a fresh job afterward (the resume path stays untouched)."""
+    pidfile = tmp_path / "child.pid"
+    slow_step = ("slow_step", "Running slow step",
+                 ["sh", "-c", f"sleep 30 & echo $! > {pidfile}; wait $!"])
+    monkeypatch.setattr(producer, "_pipeline_steps", lambda *a, **k: [slow_step])
+
+    status = producer.start_run_production("run_abc123")
+    assert status["status"] == "running"
+
+    assert _wait_until(lambda: pidfile.exists() and bool(pidfile.read_text().strip())), (
+        "step subprocess never started"
+    )
+    child_pid = int(pidfile.read_text().strip())
+
+    job = producer._ACTIVE["run_abc123"]
+    assert _wait_until(lambda: job.process is not None), "job.process never set"
+    proc_pid = job.process.pid
+
+    stopped_status = producer.stop_run_production("run_abc123")
+    assert stopped_status["status"] == "stopped"
+    assert stopped_status["error"] is None
+    assert "run_abc123" not in producer._ACTIVE
+
+    # Both the step's own process and its grandchild must be gone — not
+    # merely orphaned.
+    with pytest.raises(ProcessLookupError):
+        os.kill(proc_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+
+    # Idempotent: stopping an already-stopped run is a no-op, not an error.
+    again = producer.stop_run_production("run_abc123")
+    assert again["status"] == "stopped"
+
+    # Resume path untouched: production can be started again afterward.
+    monkeypatch.setattr(producer, "_pipeline_steps", lambda *a, **k: [("noop", "No-op", ["true"])])
+    restart_status = producer.start_run_production("run_abc123")
+    assert restart_status["status"] == "running"
+    assert _wait_until(lambda: producer.get_run_production_status("run_abc123")["status"] != "running")
+    final_status = producer.get_run_production_status("run_abc123")
+    assert final_status["status"] == "done"
+
+
+def test_stop_run_production_no_active_job_is_idempotent_noop(run_dir):
+    status = producer.stop_run_production("run_abc123")
+    assert status["status"] == "idle"
+    assert "run_abc123" not in producer._ACTIVE

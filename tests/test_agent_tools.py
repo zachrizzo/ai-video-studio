@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 
 import pytest
 
@@ -295,6 +296,64 @@ def test_qa_strict_flag(run_dir, fake_exec):
 
 
 # ---------------------------------------------------------------------------
+# _run_pipeline cancellation: the whole process group must be reaped
+# ---------------------------------------------------------------------------
+
+
+def test_run_pipeline_cancel_reaps_process_group(monkeypatch, tmp_path):
+    """Regression: a cancelled tool call (chat Stop) used to leave the whole
+    process tree `uv` spawns (its python child, and that child's own
+    mflux/ffmpeg/LTX children) running orphaned, holding the cross-process
+    generation lock for as long as it took to finish on its own.
+
+    start_new_session=True gives the spawned process its own pgid (equal to
+    its pid); cancelling the awaiting communicate() must SIGTERM/SIGKILL that
+    whole group, not just the immediate child. This test redirects
+    _run_pipeline's subprocess_exec call to a real shell script that spawns
+    its own child and sleeps — standing in for `uv` spawning `python` spawning
+    mflux/ffmpeg — so the assertions exercise real process-group semantics.
+    """
+    pidfile = tmp_path / "child.pid"
+    real_exec = asyncio.create_subprocess_exec
+    procs: list[asyncio.subprocess.Process] = []
+
+    async def _fake_exec(*_argv, **kwargs):
+        proc = await real_exec(
+            "sh", "-c", f"sleep 30 & echo $! > {pidfile}; wait $!",
+            **kwargs,
+        )
+        procs.append(proc)
+        return proc
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", _fake_exec)
+
+    async def scenario() -> int:
+        task = asyncio.ensure_future(agent_tools._run_pipeline("storyboard", []))
+        for _ in range(100):
+            if pidfile.exists() and pidfile.read_text().strip():
+                break
+            await asyncio.sleep(0.05)
+        assert pidfile.exists(), "child process never started"
+        child_pid = int(pidfile.read_text().strip())
+
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        return child_pid
+
+    child_pid = asyncio.run(scenario())
+    assert procs, "fake subprocess_exec was never called"
+    pgid = procs[0].pid
+
+    # Both the top-level process standing in for `uv` and its grandchild
+    # standing in for mflux/ffmpeg/LTX must be gone — not just orphaned.
+    with pytest.raises(ProcessLookupError):
+        os.kill(child_pid, 0)
+    with pytest.raises(ProcessLookupError):
+        os.killpg(pgid, 0)
+
+
+# ---------------------------------------------------------------------------
 # Direct-call tools
 # ---------------------------------------------------------------------------
 
@@ -303,6 +362,21 @@ def test_produce_run_missing_run_is_error(runs_root):
     result = _call("produce_run", {"run_id": "run_missing"})
     assert result.get("is_error") is True
     assert "run_missing" in _payload(result)["error"]
+
+
+def test_stop_production_missing_run_is_error(runs_root):
+    result = _call("stop_production", {"run_id": "run_missing"})
+    assert result.get("is_error") is True
+    assert "run_missing" in _payload(result)["error"]
+
+
+def test_stop_production_no_active_job_is_idempotent_noop(run_dir):
+    """Stopping a run with no production running must succeed (not error) and
+    just return the current status — a stop button double-click or an agent
+    retry must never fail."""
+    result = _call("stop_production", {"run_id": "run_abc123"})
+    assert "is_error" not in result
+    assert _payload(result)["status"] == "idle"
 
 
 def test_get_run_missing_is_error(runs_root):

@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import signal
 from pathlib import Path
 from typing import Any
 
@@ -48,6 +49,29 @@ def _err(message: str, extra: dict[str, Any] | None = None) -> dict[str, Any]:
     }
 
 
+async def _kill_process_group(proc: "asyncio.subprocess.Process") -> None:
+    """SIGTERM the process group led by `proc`, escalating to SIGKILL if it
+    hasn't exited within 5s. `start_new_session=True` on the child makes its
+    pid equal its pgid, so this reaps the whole tree `uv` spawns (its python
+    child, and that child's own mflux/ffmpeg/LTX children) — not just the
+    immediate `uv` process. SIGTERM first: pipeline steps hold the
+    cross-process generation lock and should release it cleanly if they can.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGTERM)
+    except ProcessLookupError:
+        return
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+        return
+    except asyncio.TimeoutError:
+        pass
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+
+
 async def _run_pipeline(
     step: str,
     argv: list[str],
@@ -63,8 +87,16 @@ async def _run_pipeline(
         env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
     )
-    out, _ = await proc.communicate()
+    try:
+        out, _ = await proc.communicate()
+    except BaseException:
+        # Cancellation (chat Stop) or any other error while awaiting the
+        # subprocess must not orphan it — reap the whole process group before
+        # letting the exception (e.g. CancelledError) propagate.
+        await _kill_process_group(proc)
+        raise
     text = out.decode("utf-8", errors="replace")
     return proc.returncode or 0, text[-_OUTPUT_TAIL_CHARS:]
 
@@ -444,6 +476,26 @@ async def production_status_tool(args: dict[str, Any]) -> dict[str, Any]:
     return _ok(status)
 
 
+@tool("stop_production", "Stop a background produce_run job for a run (idempotent — "
+      "a no-op if nothing is currently running). This is separate from the chat's Stop "
+      "button, which only interrupts in-flight tool calls in this conversation; use "
+      "this tool when the user wants to halt a full background production.",
+      {"run_id": str})
+async def stop_production_tool(args: dict[str, Any]) -> dict[str, Any]:
+    from src.studio import producer
+
+    try:
+        # stop_run_production can block (killing the process group, joining
+        # the producer thread) for several seconds — run it off the event
+        # loop so it doesn't freeze this chat connection's turn processing.
+        status = await asyncio.to_thread(producer.stop_run_production, args.get("run_id", ""))
+    except FileNotFoundError:
+        return _err(f"run not found (or missing script.json): {args.get('run_id')}")
+    except ValueError as exc:
+        return _err(str(exc))
+    return _ok(status)
+
+
 # ---------------------------------------------------------------------------
 # One-shot generation tools (Generate tab backend)
 # ---------------------------------------------------------------------------
@@ -577,6 +629,7 @@ _TOOLS = [
     capabilities_tool,
     produce_run_tool,
     production_status_tool,
+    stop_production_tool,
     generate_image_tool,
     generate_video_tool,
     retake_video_tool,
