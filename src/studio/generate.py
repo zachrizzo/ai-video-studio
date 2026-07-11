@@ -40,6 +40,19 @@ def _write_status(gen_id: str, data: dict) -> None:
     (p / "status.json").write_text(json.dumps(data))
 
 
+def _update_status(gen_id: str, **fields) -> None:
+    """Merge fields onto the existing status.json instead of overwriting it.
+
+    A worker calls this many times as generation progresses; a raw overwrite
+    re-includes created_at on every call (str(time.time())), which resets the
+    UI's elapsed-time timer on every poll. Merging preserves created_at (and
+    any other field not passed here) from the first write.
+    """
+    current = get_generation(gen_id) or {"id": gen_id, "created_at": time.time()}
+    current.update(fields)
+    _write_status(gen_id, current)
+
+
 def get_generation(gen_id: str) -> dict | None:
     status_file = _gen_path(gen_id) / "status.json"
     if not status_file.exists():
@@ -184,12 +197,12 @@ def _run_ltx_mlx(cmd_args: list[str], models_dir: str = "") -> dict:
         return {"success": False, "error": "ltx-2-mlx timed out after 3600s"}
 
 
-def _get_ltx_client():
+def _get_ltx_client(api_key: str | None = None):
     from src.studio.ltx_api import LTXClient
-    cfg = _cfg()
-    if not cfg.ltx_api_key:
-        raise ValueError("PTV_LTX_API_KEY env var not set")
-    return LTXClient(api_key=cfg.ltx_api_key)
+    key = api_key or _cfg().ltx_api_key
+    if not key:
+        raise ValueError("No LTX Cloud API key provided (pass api_key or set PTV_LTX_API_KEY)")
+    return LTXClient(api_key=key)
 
 
 # ---------------------------------------------------------------------------
@@ -199,11 +212,9 @@ def _get_ltx_client():
 def _run_image_gen(gen_id: str, prompt: str, cfg: PipelineConfig) -> None:
     """Generate a single image in a background thread."""
     try:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "image", "status": "generating",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": None,
-        })
+        _update_status(gen_id, type="image", status="generating",
+                        prompt=prompt, output_url=None, error=None,
+                        progress=10, progress_step="Generating image with FLUX...")
         out_dir = _gen_path(gen_id)
         out_file = out_dir / "output.png"
 
@@ -219,25 +230,16 @@ def _run_image_gen(gen_id: str, prompt: str, cfg: PipelineConfig) -> None:
                 timeout=cfg.image_timeout_seconds,
             )
         if result.success:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image", "status": "done",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": f"/generations/{gen_id}/output.png",
-                "error": None,
-            })
+            _update_status(gen_id, status="done",
+                            output_url=f"/generations/{gen_id}/output.png",
+                            error=None, progress=100, progress_step="Done")
         else:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image", "status": "failed",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": None,
-                "error": result.error_message or "Unknown error",
-            })
+            _update_status(gen_id, status="failed", output_url=None,
+                            error=result.error_message or "Unknown error",
+                            progress=0, progress_step="Failed")
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "image", "status": "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 # ---------------------------------------------------------------------------
@@ -248,11 +250,9 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
                    cfg: PipelineConfig) -> None:
     """Generate a single video in a background thread."""
     try:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "video", "status": "generating",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "thumbnail_url": None, "error": None,
-        })
+        _update_status(gen_id, type="video", status="generating",
+                        prompt=prompt, output_url=None, thumbnail_url=None,
+                        error=None, progress=5, progress_step="Starting...")
         out_dir = _gen_path(gen_id)
         out_video = out_dir / "output.mp4"
 
@@ -260,6 +260,8 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
         src_image = Path(image_path) if image_path else None
         if src_image is None or not src_image.exists():
             src_image = out_dir / "input.png"
+            _update_status(gen_id, progress=15,
+                            progress_step="Generating image with FLUX...")
             from src.imagegen.flux import generate_image
             with generation_lock():
                 img_result = generate_image(
@@ -272,21 +274,17 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
                     timeout=cfg.image_timeout_seconds,
                 )
             if not img_result.success:
-                _write_status(gen_id, {
-                    "id": gen_id, "type": "video", "status": "failed",
-                    "prompt": prompt, "created_at": time.time(),
-                    "output_url": None, "thumbnail_url": None,
-                    "error": f"Image gen failed: {img_result.error_message}",
-                })
+                _update_status(gen_id, status="failed", output_url=None,
+                                thumbnail_url=None,
+                                error=f"Image gen failed: {img_result.error_message}",
+                                progress=0, progress_step="Failed")
                 return
 
-        _write_status(gen_id, {
-            "id": gen_id, "type": "video", "status": "generating",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None,
-            "thumbnail_url": f"/generations/{gen_id}/input.png" if (out_dir / "input.png").exists() else None,
-            "error": None,
-        })
+        _update_status(
+            gen_id, status="generating", output_url=None,
+            thumbnail_url=f"/generations/{gen_id}/input.png" if (out_dir / "input.png").exists() else None,
+            error=None, progress=50, progress_step="Generating video frames...",
+        )
 
         from src.videogen.ltx import generate_ltx_clip
         with generation_lock():
@@ -310,27 +308,21 @@ def _run_video_gen(gen_id: str, prompt: str, image_path: str | None,
                 stg_scale=cfg.ltx_stg_scale,
             )
         if result.get("success"):
-            _write_status(gen_id, {
-                "id": gen_id, "type": "video", "status": "done",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": f"/generations/{gen_id}/output.mp4",
-                "thumbnail_url": f"/generations/{gen_id}/input.png" if (out_dir / "input.png").exists() else None,
-                "error": None,
-            })
+            _update_status(
+                gen_id, status="done",
+                output_url=f"/generations/{gen_id}/output.mp4",
+                thumbnail_url=f"/generations/{gen_id}/input.png" if (out_dir / "input.png").exists() else None,
+                error=None, progress=100, progress_step="Done",
+            )
         else:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "video", "status": "failed",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": None, "thumbnail_url": None,
-                "error": result.get("error_message", "Unknown error"),
-            })
+            _update_status(gen_id, status="failed", output_url=None,
+                            thumbnail_url=None,
+                            error=result.get("error_message", "Unknown error"),
+                            progress=0, progress_step="Failed")
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "video", "status": "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "thumbnail_url": None,
-            "error": str(e),
-        })
+        _update_status(gen_id, status="failed", output_url=None,
+                        thumbnail_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 def start_image_generation(prompt: str) -> str:
@@ -358,24 +350,18 @@ def start_video_generation(prompt: str, image_path: str | None = None) -> str:
 def _run_text_to_video(gen_id: str, prompt: str, backend: str,
                        model: str, duration: int | None, resolution: str | None,
                        fps: int, camera_motion: str | None,
-                       generate_audio: bool) -> None:
+                       generate_audio: bool, api_key: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
     try:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "text-to-video", "status": "generating",
-            "prompt": prompt, "backend": backend, "created_at": time.time(),
-            "output_url": None, "error": None,
-        })
+        _update_status(gen_id, type="text-to-video", status="generating",
+                        prompt=prompt, backend=backend, output_url=None,
+                        error=None)
 
         if backend == "cloud":
-            _write_status(gen_id, {
-                "id": gen_id, "type": "text-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 10, "progress_step": "Sending to LTX Cloud...",
-            })
-            client = _get_ltx_client()
+            _update_status(gen_id, progress=10,
+                            progress_step="Sending to LTX Cloud...")
+            client = _get_ltx_client(api_key)
             result = client.text_to_video(
                 output_path=out_file, prompt=prompt, model=model,
                 duration=duration, resolution=resolution, fps=fps,
@@ -386,12 +372,8 @@ def _run_text_to_video(gen_id: str, prompt: str, backend: str,
             cfg = _cfg()
             src_image = out_dir / "input.png"
 
-            _write_status(gen_id, {
-                "id": gen_id, "type": "text-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 5, "progress_step": "Generating image with FLUX...",
-            })
+            _update_status(gen_id, progress=5,
+                            progress_step="Generating image with FLUX...")
 
             from src.imagegen.flux import generate_image
             with generation_lock():
@@ -402,30 +384,18 @@ def _run_text_to_video(gen_id: str, prompt: str, backend: str,
                     timeout=cfg.image_timeout_seconds,
                 )
             if not img_result.success:
-                _write_status(gen_id, {
-                    "id": gen_id, "type": "text-to-video", "status": "failed",
-                    "prompt": prompt, "backend": backend, "created_at": time.time(),
-                    "output_url": None,
-                    "error": f"Image gen failed: {img_result.error_message}",
-                    "progress": 0, "progress_step": "Failed",
-                })
+                _update_status(gen_id, status="failed", output_url=None,
+                                error=f"Image gen failed: {img_result.error_message}",
+                                progress=0, progress_step="Failed")
                 return
 
-            _write_status(gen_id, {
-                "id": gen_id, "type": "text-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 40, "progress_step": "Loading LTX-2.3 video model...",
-            })
+            _update_status(gen_id, progress=40,
+                            progress_step="Loading LTX-2.3 video model...")
 
             from src.videogen.ltx import generate_ltx_clip
 
-            _write_status(gen_id, {
-                "id": gen_id, "type": "text-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 55, "progress_step": "Generating video frames...",
-            })
+            _update_status(gen_id, progress=55,
+                            progress_step="Generating video frames...")
 
             with generation_lock():
                 result = generate_ltx_clip(
@@ -445,54 +415,37 @@ def _run_text_to_video(gen_id: str, prompt: str, backend: str,
                        "error": result.get("error_message")}
 
         if result["success"]:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "text-to-video", "status": "done",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": f"/generations/{gen_id}/output.mp4",
-                "error": None,
-                "progress": 100, "progress_step": "Done",
-            })
+            _update_status(gen_id, status="done",
+                            output_url=f"/generations/{gen_id}/output.mp4",
+                            error=None, progress=100, progress_step="Done")
         else:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "text-to-video", "status": "failed",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": result.get("error", "Unknown error"),
-                "progress": 0, "progress_step": "Failed",
-            })
+            _update_status(gen_id, status="failed", output_url=None,
+                            error=result.get("error", "Unknown error"),
+                            progress=0, progress_step="Failed")
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "text-to-video", "status": "failed",
-            "prompt": prompt, "backend": backend, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-            "progress": 0, "progress_step": "Failed",
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 def _run_image_to_video(gen_id: str, image_path: str, prompt: str | None,
                         backend: str, model: str, duration: int | None,
                         resolution: str | None, fps: int,
                         camera_motion: str | None, generate_audio: bool,
-                        first_frame: bool | None, last_frame: bool | None) -> None:
+                        first_frame: bool | None, last_frame: bool | None,
+                        api_key: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
     try:
         saved_img = _save_upload(image_path, out_dir, "input_image")
-        _write_status(gen_id, {
-            "id": gen_id, "type": "image-to-video", "status": "generating",
-            "prompt": prompt, "backend": backend, "created_at": time.time(),
-            "output_url": None, "error": None,
-            "progress": 5, "progress_step": "Starting...",
-        })
+        _update_status(gen_id, type="image-to-video", status="generating",
+                        prompt=prompt, backend=backend, output_url=None,
+                        error=None, progress=5, progress_step="Starting...")
 
         if backend == "cloud":
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 10, "progress_step": "Sending to LTX Cloud...",
-            })
+            _update_status(gen_id, progress=10,
+                            progress_step="Sending to LTX Cloud...")
             # For cloud, image_uri must be an HTTPS URL; assume caller provides one
-            client = _get_ltx_client()
+            client = _get_ltx_client(api_key)
             result = client.image_to_video(
                 output_path=out_file, image_uri=image_path, prompt=prompt,
                 model=model, duration=duration, resolution=resolution,
@@ -504,19 +457,11 @@ def _run_image_to_video(gen_id: str, image_path: str, prompt: str | None,
             # Local: use diffusers i2v pipeline
             cfg = _cfg()
             src = saved_img or Path(image_path)
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 30, "progress_step": "Loading LTX-2.3 video model...",
-            })
+            _update_status(gen_id, progress=30,
+                            progress_step="Loading LTX-2.3 video model...")
             from src.videogen.ltx import generate_ltx_clip
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image-to-video", "status": "generating",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 50, "progress_step": "Generating video frames...",
-            })
+            _update_status(gen_id, progress=50,
+                            progress_step="Generating video frames...")
             with generation_lock():
                 lr = generate_ltx_clip(
                     image_path=src, output_path=out_file,
@@ -536,45 +481,32 @@ def _run_image_to_video(gen_id: str, image_path: str, prompt: str | None,
                        "error": lr.get("error_message")}
 
         if result["success"]:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image-to-video", "status": "done",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": f"/generations/{gen_id}/output.mp4",
-                "error": None,
-                "progress": 100, "progress_step": "Done",
-            })
+            _update_status(gen_id, status="done",
+                            output_url=f"/generations/{gen_id}/output.mp4",
+                            error=None, progress=100, progress_step="Done")
         else:
-            _write_status(gen_id, {
-                "id": gen_id, "type": "image-to-video", "status": "failed",
-                "prompt": prompt, "backend": backend, "created_at": time.time(),
-                "output_url": None, "error": result.get("error", "Unknown error"),
-                "progress": 0, "progress_step": "Failed",
-            })
+            _update_status(gen_id, status="failed", output_url=None,
+                            error=result.get("error", "Unknown error"),
+                            progress=0, progress_step="Failed")
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "image-to-video", "status": "failed",
-            "prompt": prompt, "backend": backend, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-            "progress": 0, "progress_step": "Failed",
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 def _run_audio_to_video(gen_id: str, audio_uri: str, image_uri: str | None,
                         prompt: str | None, model: str,
                         resolution: str | None,
                         guidance_scale: float | None,
-                        backend: str = "local") -> None:
+                        backend: str = "local",
+                        api_key: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
     try:
         saved_audio = _save_upload(audio_uri, out_dir, "input_audio")
         saved_image = _save_upload(image_uri, out_dir, "input_image")
-        _write_status(gen_id, {
-            "id": gen_id, "type": "audio-to-video", "status": "generating",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": None,
-            "progress": 10, "progress_step": "Starting audio-to-video...",
-        })
+        _update_status(gen_id, type="audio-to-video", status="generating",
+                        prompt=prompt, output_url=None, error=None,
+                        progress=10, progress_step="Starting audio-to-video...")
 
         if backend == "local":
             cfg = _cfg()
@@ -588,15 +520,11 @@ def _run_audio_to_video(gen_id: str, audio_uri: str, image_uri: str | None,
             ]
             if saved_image:
                 cmd += ["--image", str(saved_image)]
-            _write_status(gen_id, {
-                "id": gen_id, "type": "audio-to-video", "status": "generating",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 30, "progress_step": "Generating video from audio...",
-            })
+            _update_status(gen_id, progress=30,
+                            progress_step="Generating video from audio...")
             result = _run_ltx_mlx(cmd, cfg.models_dir)
         else:
-            client = _get_ltx_client()
+            client = _get_ltx_client(api_key)
             result = client.audio_to_video(
                 output_path=out_file, audio_uri=audio_uri, image_uri=image_uri,
                 prompt=prompt, model=model, resolution=resolution,
@@ -604,38 +532,30 @@ def _run_audio_to_video(gen_id: str, audio_uri: str, image_uri: str | None,
             )
 
         ok = result["success"] and out_file.exists()
-        _write_status(gen_id, {
-            "id": gen_id, "type": "audio-to-video",
-            "status": "done" if ok else "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": f"/generations/{gen_id}/output.mp4" if ok else None,
-            "error": result.get("error"),
-            "progress": 100 if ok else 0,
-            "progress_step": "Done" if ok else "Failed",
-        })
+        _update_status(
+            gen_id, status="done" if ok else "failed",
+            output_url=f"/generations/{gen_id}/output.mp4" if ok else None,
+            error=result.get("error"),
+            progress=100 if ok else 0,
+            progress_step="Done" if ok else "Failed",
+        )
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "audio-to-video", "status": "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-            "progress": 0, "progress_step": "Failed",
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 def _run_retake_video(gen_id: str, video_uri: str, start_time: float,
                       duration: float, prompt: str, model: str,
                       resolution: str | None, mode: str | None,
-                      backend: str = "local") -> None:
+                      backend: str = "local",
+                      api_key: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
     try:
         saved_video = _save_upload(video_uri, out_dir, "input_video")
-        _write_status(gen_id, {
-            "id": gen_id, "type": "retake", "status": "generating",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": None,
-            "progress": 10, "progress_step": "Starting retake...",
-        })
+        _update_status(gen_id, type="retake", status="generating",
+                        prompt=prompt, output_url=None, error=None,
+                        progress=10, progress_step="Starting retake...")
 
         if backend == "local":
             cfg = _cfg()
@@ -651,15 +571,11 @@ def _run_retake_video(gen_id: str, video_uri: str, start_time: float,
                 "--start", str(start_frame),
                 "--end", str(end_frame),
             ]
-            _write_status(gen_id, {
-                "id": gen_id, "type": "retake", "status": "generating",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 30, "progress_step": "Regenerating video section...",
-            })
+            _update_status(gen_id, progress=30,
+                            progress_step="Regenerating video section...")
             result = _run_ltx_mlx(cmd, cfg.models_dir)
         else:
-            client = _get_ltx_client()
+            client = _get_ltx_client(api_key)
             result = client.retake(
                 output_path=out_file, video_uri=video_uri,
                 start_time=start_time, duration=duration, prompt=prompt,
@@ -667,38 +583,30 @@ def _run_retake_video(gen_id: str, video_uri: str, start_time: float,
             )
 
         ok = result["success"] and out_file.exists()
-        _write_status(gen_id, {
-            "id": gen_id, "type": "retake",
-            "status": "done" if ok else "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": f"/generations/{gen_id}/output.mp4" if ok else None,
-            "error": result.get("error"),
-            "progress": 100 if ok else 0,
-            "progress_step": "Done" if ok else "Failed",
-        })
+        _update_status(
+            gen_id, status="done" if ok else "failed",
+            output_url=f"/generations/{gen_id}/output.mp4" if ok else None,
+            error=result.get("error"),
+            progress=100 if ok else 0,
+            progress_step="Done" if ok else "Failed",
+        )
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "retake", "status": "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-            "progress": 0, "progress_step": "Failed",
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 def _run_extend_video(gen_id: str, video_uri: str, prompt: str, model: str,
                       mode: str, duration: float | None,
                       context: float | None,
-                      backend: str = "local") -> None:
+                      backend: str = "local",
+                      api_key: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
     try:
         saved_video = _save_upload(video_uri, out_dir, "input_video")
-        _write_status(gen_id, {
-            "id": gen_id, "type": "extend", "status": "generating",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": None,
-            "progress": 10, "progress_step": "Starting extend...",
-        })
+        _update_status(gen_id, type="extend", status="generating",
+                        prompt=prompt, output_url=None, error=None,
+                        progress=10, progress_step="Starting extend...")
 
         if backend == "local":
             cfg = _cfg()
@@ -714,64 +622,51 @@ def _run_extend_video(gen_id: str, video_uri: str, prompt: str, model: str,
                 "--extend-frames", str(extend_frames),
                 "--direction", direction,
             ]
-            _write_status(gen_id, {
-                "id": gen_id, "type": "extend", "status": "generating",
-                "prompt": prompt, "created_at": time.time(),
-                "output_url": None, "error": None,
-                "progress": 30, "progress_step": f"Extending video ({direction})...",
-            })
+            _update_status(gen_id, progress=30,
+                            progress_step=f"Extending video ({direction})...")
             result = _run_ltx_mlx(cmd, cfg.models_dir)
         else:
-            client = _get_ltx_client()
+            client = _get_ltx_client(api_key)
             result = client.extend(
                 output_path=out_file, video_uri=video_uri, prompt=prompt,
                 model=model, mode=mode, duration=duration, context=context,
             )
 
         ok = result["success"] and out_file.exists()
-        _write_status(gen_id, {
-            "id": gen_id, "type": "extend",
-            "status": "done" if ok else "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": f"/generations/{gen_id}/output.mp4" if ok else None,
-            "error": result.get("error"),
-            "progress": 100 if ok else 0,
-            "progress_step": "Done" if ok else "Failed",
-        })
+        _update_status(
+            gen_id, status="done" if ok else "failed",
+            output_url=f"/generations/{gen_id}/output.mp4" if ok else None,
+            error=result.get("error"),
+            progress=100 if ok else 0,
+            progress_step="Done" if ok else "Failed",
+        )
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "extend", "status": "failed",
-            "prompt": prompt, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-            "progress": 0, "progress_step": "Failed",
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
-def _run_video_hdr(gen_id: str, video_uri: str) -> None:
+def _run_video_hdr(gen_id: str, video_uri: str, api_key: str | None = None) -> None:
     out_dir = _gen_path(gen_id)
     out_file = out_dir / "output.mp4"
     try:
         _save_upload(video_uri, out_dir, "input_video")
-        _write_status(gen_id, {
-            "id": gen_id, "type": "video-hdr", "status": "generating",
-            "created_at": time.time(),
-            "output_url": None, "error": None,
-        })
-        client = _get_ltx_client()
+        _update_status(gen_id, type="video-hdr", status="generating",
+                        output_url=None, error=None,
+                        progress=10, progress_step="Starting HDR upscale...")
+        _update_status(gen_id, progress=30, progress_step="Sending to LTX Cloud...")
+        client = _get_ltx_client(api_key)
         result = client.video_to_video_hdr(output_path=out_file, video_uri=video_uri)
-        status = "done" if result["success"] else "failed"
-        _write_status(gen_id, {
-            "id": gen_id, "type": "video-hdr", "status": status,
-            "created_at": time.time(),
-            "output_url": f"/generations/{gen_id}/output.mp4" if result["success"] else None,
-            "error": result.get("error"),
-        })
+        ok = result["success"]
+        _update_status(
+            gen_id, status="done" if ok else "failed",
+            output_url=f"/generations/{gen_id}/output.mp4" if ok else None,
+            error=result.get("error"),
+            progress=100 if ok else 0,
+            progress_step="Done" if ok else "Failed",
+        )
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "video-hdr", "status": "failed",
-            "created_at": time.time(),
-            "output_url": None, "error": str(e),
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 # ---------------------------------------------------------------------------
@@ -787,13 +682,14 @@ def start_text_to_video(
     fps: int = 25,
     camera_motion: str | None = None,
     generate_audio: bool = True,
+    api_key: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("text-to-video")
     _write_initial_status(gen_id, "text-to-video", prompt)
     t = threading.Thread(
         target=_run_text_to_video,
         args=(gen_id, prompt, backend, model, duration, resolution, fps,
-              camera_motion, generate_audio),
+              camera_motion, generate_audio, api_key),
         daemon=True,
     )
     t.start()
@@ -812,13 +708,14 @@ def start_image_to_video(
     generate_audio: bool = True,
     first_frame: bool | None = None,
     last_frame: bool | None = None,
+    api_key: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("image-to-video")
     _write_initial_status(gen_id, "image-to-video", prompt)
     t = threading.Thread(
         target=_run_image_to_video,
         args=(gen_id, image_path, prompt, backend, model, duration, resolution,
-              fps, camera_motion, generate_audio, first_frame, last_frame),
+              fps, camera_motion, generate_audio, first_frame, last_frame, api_key),
         daemon=True,
     )
     t.start()
@@ -833,13 +730,14 @@ def start_audio_to_video(
     resolution: str | None = None,
     guidance_scale: float | None = None,
     backend: str = "local",
+    api_key: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("audio-to-video")
     _write_initial_status(gen_id, "audio-to-video", prompt)
     t = threading.Thread(
         target=_run_audio_to_video,
         args=(gen_id, audio_uri, image_uri, prompt, model, resolution,
-              guidance_scale, backend),
+              guidance_scale, backend, api_key),
         daemon=True,
     )
     t.start()
@@ -855,13 +753,14 @@ def start_retake_video(
     resolution: str | None = None,
     mode: str | None = None,
     backend: str = "local",
+    api_key: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("retake")
     _write_initial_status(gen_id, "retake", prompt)
     t = threading.Thread(
         target=_run_retake_video,
         args=(gen_id, video_uri, start_time, duration, prompt, model,
-              resolution, mode, backend),
+              resolution, mode, backend, api_key),
         daemon=True,
     )
     t.start()
@@ -876,24 +775,25 @@ def start_extend_video(
     duration: float | None = None,
     context: float | None = None,
     backend: str = "local",
+    api_key: str | None = None,
 ) -> str:
     gen_id, _ = _new_gen("extend")
     _write_initial_status(gen_id, "extend", prompt)
     t = threading.Thread(
         target=_run_extend_video,
-        args=(gen_id, video_uri, prompt, model, mode, duration, context, backend),
+        args=(gen_id, video_uri, prompt, model, mode, duration, context, backend, api_key),
         daemon=True,
     )
     t.start()
     return gen_id
 
 
-def start_video_hdr(video_uri: str) -> str:
+def start_video_hdr(video_uri: str, api_key: str | None = None) -> str:
     gen_id, _ = _new_gen("video-hdr")
     _write_initial_status(gen_id, "video-hdr")
     t = threading.Thread(
         target=_run_video_hdr,
-        args=(gen_id, video_uri),
+        args=(gen_id, video_uri, api_key),
         daemon=True,
     )
     t.start()
@@ -918,18 +818,10 @@ def _run_tts(gen_id: str, text: str, speaker: str, language: str,
             provider is None and cfg.voice_provider == "voicebox"
         )
         engine = "Voicebox" if use_voicebox else "Qwen3-TTS"
-        _write_status(gen_id, {
-            "id": gen_id, "type": "text-to-speech", "status": "generating",
-            "prompt": text, "created_at": time.time(),
-            "output_url": None, "error": None,
-            "progress": 10, "progress_step": f"Loading {engine}...",
-        })
-        _write_status(gen_id, {
-            "id": gen_id, "type": "text-to-speech", "status": "generating",
-            "prompt": text, "created_at": time.time(),
-            "output_url": None, "error": None,
-            "progress": 30, "progress_step": "Generating speech...",
-        })
+        _update_status(gen_id, type="text-to-speech", status="generating",
+                        prompt=text, output_url=None, error=None,
+                        progress=10, progress_step=f"Loading {engine}...")
+        _update_status(gen_id, progress=30, progress_step="Generating speech...")
         if use_voicebox:
             from src.studio.tts_voicebox import generate_speech_voicebox
             result = generate_speech_voicebox(
@@ -945,22 +837,16 @@ def _run_tts(gen_id: str, text: str, speaker: str, language: str,
                 model_size=model_size,
             )
         ok = result["success"] and out_file.exists()
-        _write_status(gen_id, {
-            "id": gen_id, "type": "text-to-speech",
-            "status": "done" if ok else "failed",
-            "prompt": text, "created_at": time.time(),
-            "output_url": f"/generations/{gen_id}/output.wav" if ok else None,
-            "error": result.get("error"),
-            "progress": 100 if ok else 0,
-            "progress_step": "Done" if ok else "Failed",
-        })
+        _update_status(
+            gen_id, status="done" if ok else "failed",
+            output_url=f"/generations/{gen_id}/output.wav" if ok else None,
+            error=result.get("error"),
+            progress=100 if ok else 0,
+            progress_step="Done" if ok else "Failed",
+        )
     except Exception as e:
-        _write_status(gen_id, {
-            "id": gen_id, "type": "text-to-speech", "status": "failed",
-            "prompt": text, "created_at": time.time(),
-            "output_url": None, "error": str(e),
-            "progress": 0, "progress_step": "Failed",
-        })
+        _update_status(gen_id, status="failed", output_url=None, error=str(e),
+                        progress=0, progress_step="Failed")
 
 
 def start_tts(

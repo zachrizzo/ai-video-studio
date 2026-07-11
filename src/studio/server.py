@@ -139,6 +139,7 @@ class TextToVideoRequest(BaseModel):
     fps: int = 25
     camera_motion: str | None = None
     generate_audio: bool = True
+    api_key: str | None = None
 
 class ImageToVideoRequest(BaseModel):
     image_path: str
@@ -152,6 +153,7 @@ class ImageToVideoRequest(BaseModel):
     generate_audio: bool = True
     first_frame: bool | None = None
     last_frame: bool | None = None
+    api_key: str | None = None
 
 class AudioToVideoRequest(BaseModel):
     audio_uri: str
@@ -161,6 +163,7 @@ class AudioToVideoRequest(BaseModel):
     resolution: str | None = None
     guidance_scale: float | None = None
     backend: str = "local"
+    api_key: str | None = None
 
 class RetakeRequest(BaseModel):
     video_uri: str
@@ -171,6 +174,7 @@ class RetakeRequest(BaseModel):
     resolution: str | None = None
     mode: str | None = None
     backend: str = "local"
+    api_key: str | None = None
 
 class ExtendRequest(BaseModel):
     video_uri: str
@@ -180,9 +184,11 @@ class ExtendRequest(BaseModel):
     duration: float | None = None
     context: float | None = None
     backend: str = "local"
+    api_key: str | None = None
 
 class VideoHDRRequest(BaseModel):
     video_uri: str
+    api_key: str | None = None
 
 class PresetSaveRequest(BaseModel):
     id: str
@@ -509,6 +515,7 @@ async def api_text_to_video(req: TextToVideoRequest) -> dict:
         prompt=req.prompt, backend=req.backend, model=req.model,
         duration=req.duration, resolution=req.resolution, fps=req.fps,
         camera_motion=req.camera_motion, generate_audio=req.generate_audio,
+        api_key=req.api_key,
     )
     return {"id": gen_id}
 
@@ -520,7 +527,7 @@ async def api_image_to_video(req: ImageToVideoRequest) -> dict:
         model=req.model, duration=req.duration, resolution=req.resolution,
         fps=req.fps, camera_motion=req.camera_motion,
         generate_audio=req.generate_audio, first_frame=req.first_frame,
-        last_frame=req.last_frame,
+        last_frame=req.last_frame, api_key=req.api_key,
     )
     return {"id": gen_id}
 
@@ -531,6 +538,7 @@ async def api_audio_to_video(req: AudioToVideoRequest) -> dict:
         audio_uri=req.audio_uri, image_uri=req.image_uri,
         prompt=req.prompt, model=req.model, resolution=req.resolution,
         guidance_scale=req.guidance_scale, backend=req.backend,
+        api_key=req.api_key,
     )
     return {"id": gen_id}
 
@@ -541,6 +549,7 @@ async def api_retake(req: RetakeRequest) -> dict:
         video_uri=req.video_uri, start_time=req.start_time,
         duration=req.duration, prompt=req.prompt, model=req.model,
         resolution=req.resolution, mode=req.mode, backend=req.backend,
+        api_key=req.api_key,
     )
     return {"id": gen_id}
 
@@ -550,14 +559,14 @@ async def api_extend(req: ExtendRequest) -> dict:
     gen_id = start_extend_video(
         video_uri=req.video_uri, prompt=req.prompt, model=req.model,
         mode=req.mode, duration=req.duration, context=req.context,
-        backend=req.backend,
+        backend=req.backend, api_key=req.api_key,
     )
     return {"id": gen_id}
 
 
 @app.post("/api/generate/video-hdr")
 async def api_video_hdr(req: VideoHDRRequest) -> dict:
-    gen_id = start_video_hdr(video_uri=req.video_uri)
+    gen_id = start_video_hdr(video_uri=req.video_uri, api_key=req.api_key)
     return {"id": gen_id}
 
 
