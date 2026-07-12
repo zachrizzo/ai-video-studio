@@ -356,3 +356,20 @@ def test_cmd_synthesize_voicebox_dispatch(voicebox_server, tmp_path: Path, monke
     assert calls[0]["profile"] == "p1"
     assert calls[0]["seed"] is None
     assert calls[0]["language"] == "en"
+
+
+# ---------------------------------------------------------------------------
+# _normalize_language — full names from presets/tool args must become ISO
+# codes before reaching /generate (Voicebox 422s on "english").
+# ---------------------------------------------------------------------------
+
+
+def test_normalize_language_maps_full_names_and_codes() -> None:
+    from src.studio.tts_voicebox import _normalize_language
+
+    assert _normalize_language("english") == "en"
+    assert _normalize_language("English ") == "en"
+    assert _normalize_language("en") == "en"
+    assert _normalize_language("zh") == "zh"
+    assert _normalize_language("") == "en"
+    assert _normalize_language("klingon") == "en"  # unknown full name -> safe default

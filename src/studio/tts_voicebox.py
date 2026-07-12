@@ -193,6 +193,28 @@ def resolve_profile(url: str, name_or_id: str) -> str:
     )
 
 
+# Voicebox's /generate expects ISO 639-1 codes; callers upstream (presets, the
+# synthesize tool's shared `language` arg) often carry full names like
+# "english". Normalize here so every caller is safe — an unrecognized full
+# name falls back to "en" rather than 422ing the whole synthesis run.
+_LANGUAGE_ALIASES = {
+    "english": "en", "spanish": "es", "french": "fr", "german": "de",
+    "italian": "it", "portuguese": "pt", "japanese": "ja", "chinese": "zh",
+    "korean": "ko", "hindi": "hi", "arabic": "ar", "russian": "ru",
+}
+
+
+def _normalize_language(language: str) -> str:
+    lang = (language or "").strip().lower()
+    if not lang:
+        return "en"
+    if lang in _LANGUAGE_ALIASES:
+        return _LANGUAGE_ALIASES[lang]
+    if len(lang) <= 3:  # already an ISO-style code (en, es, zh-cn stays as-is below)
+        return lang
+    return "en"
+
+
 def generate_speech_voicebox(
     text: str,
     output_path: Path,
@@ -249,7 +271,8 @@ def generate_speech_voicebox(
         matched = next((p for p in profiles if str(p.get("id")) == profile_id), None)
         engine = (matched or {}).get("default_engine") or None
 
-    payload: dict = {"profile_id": profile_id, "text": text, "language": language}
+    payload: dict = {"profile_id": profile_id, "text": text,
+                     "language": _normalize_language(language)}
     if seed is not None:
         payload["seed"] = seed
     if engine:
