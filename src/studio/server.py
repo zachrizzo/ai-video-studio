@@ -230,6 +230,7 @@ class PresetSaveRequest(BaseModel):
     video_fallback_to_kenburns: bool | None = None
     kenburns_zoom: float | None = None
     qwen_model_size: str | None = None
+    video_speed: float | None = None
 
 class TTSRequest(BaseModel):
     text: str

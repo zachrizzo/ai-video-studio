@@ -364,8 +364,10 @@ async def videogen_tool(args: dict[str, Any]) -> dict[str, Any]:
 
 @tool("composite",
       "Composite the final video from <run_dir>/composite_manifest.json (run manifest first). "
-      "output_name: optional file name inside the run dir (default final.mp4).",
-      _schema({"run_id": _STR, "output_name": _STR}, ["run_id"]))
+      "output_name: optional file name inside the run dir (default final.mp4). "
+      "speed: final playback speed multiplier (e.g. 1.25); defaults to the "
+      "pipeline's configured PTV_VIDEO_SPEED.",
+      _schema({"run_id": _STR, "output_name": _STR, "speed": _NUM}, ["run_id"]))
 async def composite_tool(args: dict[str, Any]) -> dict[str, Any]:
     try:
         run_dir = _resolve_run_dir(args.get("run_id"))
@@ -378,7 +380,10 @@ async def composite_tool(args: dict[str, Any]) -> dict[str, Any]:
     if "/" in output_name or "\\" in output_name or ".." in output_name:
         return _err(f"invalid output_name: {output_name!r}")
     output = run_dir / output_name
-    code, out = await _run_pipeline("composite", [str(manifest), str(output)])
+    argv = [str(manifest), str(output)]
+    if args.get("speed") is not None:
+        argv += ["--speed", str(float(args["speed"]))]
+    code, out = await _run_pipeline("composite", argv)
     return _step_result("composite", code, out, {"output_path": str(output)})
 
 

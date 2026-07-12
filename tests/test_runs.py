@@ -207,3 +207,35 @@ def test_get_run_duration_falls_back_for_failed_segment_and_totals_per_segment(
     # sum of audio_manifest.values() (which would include the "_voice" 0 and
     # the failed segment's zeroed duration).
     assert result["total_duration_seconds"] == pytest.approx(4.2 + 6.0)
+
+
+def test_image_urls_fall_back_to_collage_assets(tmp_path, monkeypatch) -> None:
+    """Collage segments keep art in assets/<seg_id>/, not images/ — the viewer's
+    IMAGES column must surface those instead of showing 'No images yet'."""
+    import json
+
+    from src.studio import runs as runs_mod
+
+    monkeypatch.setenv("STUDIO_RUNS_DIR", str(tmp_path))
+    run_dir = tmp_path / "run_collage1"
+    (run_dir / "assets" / "seg01_intro").mkdir(parents=True)
+    (run_dir / "assets" / "seg01_intro" / "wolf.png").write_bytes(b"png")
+    (run_dir / "assets" / "seg01_intro" / "hills.png").write_bytes(b"png")
+    run_dir.joinpath("script.json").write_text(json.dumps({
+        "title": "t",
+        "segments": [{
+            "segment_id": "seg01_intro",
+            "section_title": "Intro",
+            "narration_text": "hello",
+            "visual_type": "diagram",
+            "visual_engine": "collage",
+            "estimated_duration_seconds": 5,
+        }],
+    }))
+
+    run = runs_mod.get_run("run_collage1")
+    urls = run["segments"][0]["image_urls"]
+    assert urls == [
+        "/media/run_collage1/assets/seg01_intro/hills.png",
+        "/media/run_collage1/assets/seg01_intro/wolf.png",
+    ]

@@ -316,7 +316,11 @@ Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip; needs an
 examples in docs/collage/examples/). Collage's scripted, word-synced motion with
 on-screen labels/dates/maps is the house style — every movement is authored, so
 nothing drifts or looks illogical. Reserve LTX "scene" clips for moments that
-genuinely need organic/photographic motion, or when the user asks for AI video. Prefer `at_word`/`at_frac` TimeRefs over
+genuinely need organic/photographic motion, or when the user asks for AI video.
+PACING: keep collage scenes visually alive — something on screen should change
+every 3-5 seconds (an element entering/exiting, a label appearing, a map region
+filling, a camera drift shifting focus). Author several timed cues per scene;
+never let a single static composition hold for more than ~5 seconds. Prefer `at_word`/`at_frac` TimeRefs over
 absolute seconds; `at_word` refs REQUIRE align to have run first (whisper must be
 installed — there is no estimated fallback). Segments may declare `sfx` cues mixed
 under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",
@@ -1025,6 +1029,14 @@ async def handle_ws(websocket: WebSocket) -> None:
                         f"- Video motion tuning: call videogen with {', '.join(ltx_params)}.\n"
                     )
 
+                speed_line = ""
+                preset_speed = preset.get("video_speed")
+                if preset_speed and float(preset_speed) != 1.0:
+                    speed_line = (
+                        f"- Final playback speed: {preset_speed}x — pass "
+                        f"speed={preset_speed} to composite (and to produce_run "
+                        f"if you use it) so the final video is retimed.\n"
+                    )
                 preset_ctx = (
                     f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
                     f"- Image style: {preset.get('style_prompt', '')}\n"
@@ -1032,6 +1044,7 @@ async def handle_ws(websocket: WebSocket) -> None:
                     f"- Target length: {preset.get('video_length_minutes', '?')} minutes\n"
                     f"- Voice: speaker={preset.get('voice_speaker', 'serena')}, language={preset.get('voice_language', 'english')}\n"
                     f"- Video motion: {preset.get('video_provider', 'ltx')}\n"
+                    f"{speed_line}"
                     f"{collage_lines}"
                     f"{generation_lines}"
                     f"IMPORTANT: Use these settings when generating the video. "

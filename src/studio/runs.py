@@ -120,7 +120,12 @@ def _visual_stems(seg: dict[str, Any]) -> list[str]:
 
 
 def _image_urls(run_dir: Path, seg: dict[str, Any]) -> list[str]:
-    """Return media URLs for a segment's generated beat stills."""
+    """Return media URLs for a segment's generated beat stills.
+
+    Collage segments keep their art under assets/<segment_id>/ instead of
+    images/ — surface those too so the viewer's IMAGES column isn't empty for
+    the (default) collage engine.
+    """
     run_id = run_dir.name
     urls: list[str] = []
     for stem in _visual_stems(seg):
@@ -131,6 +136,11 @@ def _image_urls(run_dir: Path, seg: dict[str, Any]) -> list[str]:
     legacy = run_dir / "images" / f"{seg_id}.png"
     if not urls and legacy.exists():
         urls.append(f"/media/{run_id}/images/{seg_id}.png")
+    if not urls:
+        assets_dir = run_dir / "assets" / seg_id
+        if assets_dir.is_dir():
+            for png in sorted(assets_dir.glob("*.png")):
+                urls.append(f"/media/{run_id}/assets/{seg_id}/{png.name}")
     return urls
 
 

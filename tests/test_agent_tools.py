@@ -273,6 +273,18 @@ def test_composite_uses_manifest_and_default_output(run_dir, fake_exec):
     assert _payload(result)["output_path"] == str(run_dir / "final.mp4")
 
 
+def test_composite_passes_speed_flag(run_dir, fake_exec):
+    calls = fake_exec()
+    (run_dir / "composite_manifest.json").write_text("{}")
+    result = _call("composite", {"run_id": "run_abc123", "speed": 1.25})
+    assert "is_error" not in result
+    assert calls[0]["argv"] == (
+        "uv", "run", "python", "-m", "src.pipeline", "composite",
+        str(run_dir / "composite_manifest.json"), str(run_dir / "final.mp4"),
+        "--speed", "1.25",
+    )
+
+
 def test_composite_requires_manifest(run_dir, fake_exec):
     fake_exec()
     result = _call("composite", {"run_id": "run_abc123"})

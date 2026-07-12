@@ -28,11 +28,12 @@ DEFAULT_PRESETS = {
         "voice_speaker": "eric",
         "voice_language": "english",
         "video_provider": "ltx",
-        "narration_style": "Grave, cinematic documentary narrator. Long deliberate pauses. History told like a slow-burning epic — intimate, ominous, humane.",
+        "narration_style": "Brisk, gripping documentary narrator. Tight pacing — no dead air, short punchy sentences driving forward, momentum like a thriller. Vivid and cinematic, never slow.",
         "tts_provider": "voicebox",
         "voicebox_profile": "Eric",
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
+        "video_speed": 1.25,
         "sfx_style": (
             "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "
             "(-8..-12 dB), war_drums/ocean_waves/fire_crackle/wind_howl/bell_toll as "
@@ -206,6 +207,9 @@ _ENV_FLOAT_KEYS = {
     "ltx_cfg_scale": "PTV_LTX_CFG_SCALE",
     "ltx_stg_scale": "PTV_LTX_STG_SCALE",
     "kenburns_zoom": "PTV_KENBURNS_ZOOM",
+    # Final composite playback speed (composite reads PTV_VIDEO_SPEED when no
+    # explicit --speed/produce speed is passed). Explicit produce speed wins.
+    "video_speed": "PTV_VIDEO_SPEED",
 }
 _ENV_BOOL_KEYS = {
     "ltx_prefer_extend": "PTV_LTX_PREFER_EXTEND",
