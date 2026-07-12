@@ -340,6 +340,9 @@ def test_cmd_synthesize_voicebox_dispatch(voicebox_server, tmp_path: Path, monke
     monkeypatch.setattr(tts_voicebox, "generate_speech_voicebox", fake_generate)
     monkeypatch.setenv("PTV_VOICE_PROVIDER", "voicebox")
     monkeypatch.setenv("PTV_VOICEBOX_URL", voicebox_server)
+    # Pin the profile explicitly: the fake server only lists Narrator/Morgan,
+    # and this test is about dispatch/resolution, not the config default.
+    monkeypatch.setenv("PTV_VOICEBOX_PROFILE", "Narrator")
 
     script_path = _write_min_script(tmp_path)
     out_dir = tmp_path / "audio"

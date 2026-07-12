@@ -18,6 +18,27 @@ def split_resolution(resolution: str) -> tuple[str, str] | None:
         return None
 
 DEFAULT_PRESETS = {
+    # First preset is the default the UI selects on load — the collage
+    # documentary style is the house default (scripted, word-synced motion).
+    "historical_epic": {
+        "name": "Historical Epic",
+        "description": "Archival collage documentary for history — battles, fleets, empires — with period sound effects",
+        "style_prompt": "19th century oil painting, muted archival palette, soft natural light, aged canvas texture, cream and terracotta tones, dramatic historical scene",
+        "video_length_minutes": 6,
+        "voice_speaker": "eric",
+        "voice_language": "english",
+        "video_provider": "ltx",
+        "narration_style": "Grave, cinematic documentary narrator. Long deliberate pauses. History told like a slow-burning epic — intimate, ominous, humane.",
+        "tts_provider": "voicebox",
+        "voicebox_profile": "Eric",
+        "style_pack": "anthropic_docu",
+        "default_visual_engine": "collage",
+        "sfx_style": (
+            "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "
+            "(-8..-12 dB), war_drums/ocean_waves/fire_crackle/wind_howl/bell_toll as "
+            "at_frac 0 ambience (-16..-20 dB). Most segments should carry at least one cue."
+        ),
+    },
     "stick_figure_history": {
         "name": "Stick Figure History",
         "description": "OverSimplified-style stick figure illustrations with comedic narration",
@@ -28,7 +49,7 @@ DEFAULT_PRESETS = {
         "video_provider": "ltx",
         "narration_style": "Fast-paced, witty, sarcastic humor. Short punchy sentences. Use modern slang to describe historical events. Make jokes.",
         "tts_provider": "voicebox",
-        "voicebox_profile": "Narrator",
+        "voicebox_profile": "Eric",
     },
     "cinematic_documentary": {
         "name": "Cinematic Documentary",
@@ -52,7 +73,7 @@ DEFAULT_PRESETS = {
         "video_provider": "ltx",
         "narration_style": "Friendly, clear teacher voice. Break complex topics into simple parts. Use analogies. Pause for emphasis on key points.",
         "tts_provider": "voicebox",
-        "voicebox_profile": "Narrator",
+        "voicebox_profile": "Eric",
     },
     "anime_style": {
         "name": "Anime Style",
@@ -64,7 +85,7 @@ DEFAULT_PRESETS = {
         "video_provider": "ltx",
         "narration_style": "Energetic and dramatic. Use exclamations. Build hype. Describe action scenes vividly.",
         "tts_provider": "voicebox",
-        "voicebox_profile": "Narrator",
+        "voicebox_profile": "Eric",
     },
     "anthropic_documentary": {
         "name": "Anthropic Documentary",
@@ -85,25 +106,6 @@ DEFAULT_PRESETS = {
             "musket_volley, bell_toll) pinned at_word at -8..-12 dB."
         ),
     },
-    "historical_epic": {
-        "name": "Historical Epic",
-        "description": "Archival collage documentary for history — battles, fleets, empires — with period sound effects",
-        "style_prompt": "19th century oil painting, muted archival palette, soft natural light, aged canvas texture, cream and terracotta tones, dramatic historical scene",
-        "video_length_minutes": 6,
-        "voice_speaker": "eric",
-        "voice_language": "english",
-        "video_provider": "ltx",
-        "narration_style": "Grave, cinematic documentary narrator. Long deliberate pauses. History told like a slow-burning epic — intimate, ominous, humane.",
-        "tts_provider": "voicebox",
-        "voicebox_profile": "Narrator",
-        "style_pack": "anthropic_docu",
-        "default_visual_engine": "collage",
-        "sfx_style": (
-            "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "
-            "(-8..-12 dB), war_drums/ocean_waves/fire_crackle/wind_howl/bell_toll as "
-            "at_frac 0 ambience (-16..-20 dB). Most segments should carry at least one cue."
-        ),
-    },
     "dark_horror": {
         "name": "Dark & Horror",
         "description": "Dark atmospheric scenes with eerie narration",
@@ -114,7 +116,7 @@ DEFAULT_PRESETS = {
         "video_provider": "ltx",
         "narration_style": "Slow, ominous whisper. Build dread. Use pauses. Describe sounds and sensations. Creepy atmosphere.",
         "tts_provider": "voicebox",
-        "voicebox_profile": "Narrator",
+        "voicebox_profile": "Eric",
     },
 }
 

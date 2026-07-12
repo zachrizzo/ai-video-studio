@@ -218,6 +218,9 @@
     var node = document.createElement("div");
     node.className = "collage-label collage-label-" + el.style;
     node.style.color = el.color;
+    // Labels annotate the artwork and must always read above any layer,
+    // regardless of that layer's authored z (layers use small ints like 0-3).
+    node.style.zIndex = "500";
     var pin = null;
     if (el.attach) {
       pin = document.createElement("div");
@@ -408,6 +411,8 @@
     node.style.color = el.color;
     node.style.left = el.x * FW + "px";
     node.style.top = el.y * FH + "px";
+    // Captions read above any layer, regardless of that layer's authored z.
+    node.style.zIndex = "500";
     var textSpan = document.createElement("span");
     var cursor = document.createElement("span");
     cursor.className = "collage-cursor";
@@ -438,6 +443,8 @@
   function buildNodeGraph(el) {
     var wrap = document.createElement("div");
     wrap.className = "collage-nodegraph";
+    // Diagram reads above any layer, regardless of that layer's authored z.
+    wrap.style.zIndex = "500";
     // Build the SVG through innerHTML so the parser assigns the SVG namespace.
     var svg =
       '<svg class="collage-ng-svg" viewBox="0 0 1000 562" preserveAspectRatio="none">';

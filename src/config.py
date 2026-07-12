@@ -33,7 +33,7 @@ class PipelineConfig(BaseSettings):
     # there is no fallback. voicebox_profile is a profile NAME (case-insensitive)
     # or id from the app's profile list.
     voicebox_url: str = "http://127.0.0.1:17493"
-    voicebox_profile: str = "Narrator"
+    voicebox_profile: str = "Eric"
     voicebox_language: str = "en"
 
     # Video Settings

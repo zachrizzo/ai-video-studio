@@ -56,7 +56,7 @@ def presets_file() -> Path:
     return target
 
 
-DEFAULT_AGENT_MODEL = "claude-sonnet-5"
+DEFAULT_AGENT_MODEL = "claude-opus-4-8"
 
 
 def agent_model() -> str | None:

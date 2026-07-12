@@ -310,10 +310,13 @@ script.json fails validation without it, including "scene" segments (where it
 is unused by the clip path; use "html" there).
 Segments have `visual_type`: "scene" (a FLUX photo → LTX motion clip; needs an
 `image_prompt`, or preferably an ordered `visual_beats` list) or "diagram"
-(HTML/Manim). For documentary/explainer segments where designed motion beats AI
-video, set `visual_engine` to "collage" (keep `visual_type` "diagram") and author
+(HTML/Manim). DEFAULT to the collage engine: set `visual_engine` to "collage"
+(keep `visual_type` "diagram") and author
 `<run_dir>/scenes/{segment_id}.collage.json` per docs/collage/AUTHORING.md (golden
-examples in docs/collage/examples/). Prefer `at_word`/`at_frac` TimeRefs over
+examples in docs/collage/examples/). Collage's scripted, word-synced motion with
+on-screen labels/dates/maps is the house style — every movement is authored, so
+nothing drifts or looks illogical. Reserve LTX "scene" clips for moments that
+genuinely need organic/photographic motion, or when the user asks for AI video. Prefer `at_word`/`at_frac` TimeRefs over
 absolute seconds; `at_word` refs REQUIRE align to have run first (whisper must be
 installed — there is no estimated fallback). Segments may declare `sfx` cues mixed
 under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",
