@@ -1003,6 +1003,16 @@ def cmd_composite(manifest_json: str, output_path: str, *args):
     # The manifest lives in the run dir, so its parent is the run dir.
     import shutil
     run_dir = Path(manifest_json).resolve().parent
+    # Record the playback speed actually applied. The --speed flag overrides
+    # config.video_speed, so QA's A/V-sync check must read the real speed from
+    # here rather than assuming the config default (which would falsely flag a
+    # speed-adjusted final as drifted).
+    try:
+        (run_dir / "composite_meta.json").write_text(
+            json.dumps({"speed": speed}), encoding="utf-8"
+        )
+    except Exception as exc:  # noqa: BLE001
+        console.print(f"[yellow]Could not write composite_meta.json: {exc}[/yellow]")
     run_final = run_dir / "final.mp4"
     try:
         if Path(final).resolve() != run_final.resolve():

@@ -785,7 +785,18 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
             if not key.startswith("_") and isinstance(entry, dict) and not entry.get("failed")
         )
         final_duration = _ffprobe_duration(final_video)
+        # Prefer the speed cmd_composite actually applied (persisted to
+        # composite_meta.json). The --speed flag overrides config.video_speed,
+        # so trusting the config default alone falsely flags a speed-adjusted
+        # final as A/V-drifted.
         speed = float(config.video_speed or 1.0)
+        try:
+            meta = json.loads((run_dir / "composite_meta.json").read_text(encoding="utf-8"))
+            meta_speed = float(meta.get("speed"))
+            if meta_speed > 0:
+                speed = meta_speed
+        except (OSError, ValueError, TypeError, json.JSONDecodeError):
+            pass
         if narration_total > 0 and final_duration is not None and speed > 0:
             expected = narration_total / speed
             tolerance = max(1.0, expected * 0.015)

@@ -104,3 +104,16 @@ def test_av_sync_expectation_respects_video_speed(tmp_path: Path, monkeypatch) -
     run_dir = _make_run(tmp_path, narration_seconds=8.0, final_seconds=4.0)
     report = qa_run(run_dir)
     assert "final.av_sync_drift" not in {c["id"] for c in report["checks"]}
+
+
+def test_av_sync_prefers_composite_meta_speed(tmp_path: Path) -> None:
+    """cmd_composite persists the speed it actually applied (which may come
+    from --speed, overriding config) to composite_meta.json; the drift check
+    must trust that over the config default, or a deliberately retimed final
+    (e.g. 1.25x) is falsely flagged as A/V drift."""
+    import json as _json
+
+    run_dir = _make_run(tmp_path, narration_seconds=10.0, final_seconds=8.0)
+    (run_dir / "composite_meta.json").write_text(_json.dumps({"speed": 1.25}))
+    report = qa_run(run_dir)
+    assert "final.av_sync_drift" not in {c["id"] for c in report["checks"]}
