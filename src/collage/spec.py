@@ -102,6 +102,41 @@ class _Element(_Frozen):
         return self
 
 
+class MoveKey(_Frozen):
+    """One keyframe of a layer's motion path (positions may go off-frame so
+    subjects can march/sail in and out of shot). Fields left None inherit the
+    previous keyframe's value (the first keyframe inherits the layer's base
+    pose). Author keys in chronological order."""
+
+    time: TimeRef
+    x: float | None = Field(default=None, ge=-0.5, le=1.5)
+    y: float | None = Field(default=None, ge=-0.5, le=1.5)
+    scale: float | None = Field(default=None, gt=0)
+    rotate: float | None = None  # degrees
+
+
+class Oscillation(_Frozen):
+    """Continuous closed-form wobble layered on top of the pose — bobbing
+    marchers, rocking ships, undulating wave strips. amplitude is in
+    normalized frame units for x/y, degrees for rotate, scale delta for
+    scale."""
+
+    axis: Literal["x", "y", "rotate", "scale"]
+    amplitude: float = Field(gt=0)
+    period: float = Field(gt=0.2, le=60)  # seconds per full cycle
+    phase: float = Field(default=0.0, ge=0, le=1)  # cycle offset, for phased waves
+
+    @model_validator(mode="after")
+    def _sane_amplitude(self) -> "Oscillation":
+        limits = {"x": 0.5, "y": 0.5, "rotate": 45.0, "scale": 0.5}
+        if self.amplitude > limits[self.axis]:
+            raise ValueError(
+                f"oscillate.amplitude {self.amplitude} too large for axis "
+                f"{self.axis!r} (max {limits[self.axis]})"
+            )
+        return self
+
+
 class LayerElement(_Element):
     """A cutout/painting layer positioned in the parallax stack."""
 
@@ -115,6 +150,10 @@ class LayerElement(_Element):
     rotate: float = 0.0  # degrees
     opacity: float = Field(default=1.0, ge=0, le=1)
     z: int = 0  # explicit stacking; ties break by list order
+    # Subject motion: a keyframed path across the scene and/or a continuous
+    # oscillation. Both are closed-form functions of t (seek-contract safe).
+    move: list[MoveKey] = Field(default_factory=list)
+    oscillate: Oscillation | None = None
 
 
 class LabelElement(_Element):

@@ -103,6 +103,48 @@ drift over 0.6s), and a `type`.
   "x": 0.5, "y": 0.58, "width": 1.1, "depth": 0.5, "z": 1 }
 ```
 
+Layers also carry SUBJECT MOTION — use it on every living subject so scenes
+feel alive rather than a static painting the camera drifts over:
+
+- `move`: keyframed pose path. Each key has a `time` (TimeRef) plus any of
+  `x`/`y`/`scale`/`rotate`; omitted fields inherit the previous key (the first
+  key inherits the layer's base pose). Positions may run off-frame
+  (-0.5..1.5) so subjects can march or sail INTO and OUT OF shot. Keys are
+  interpolated with the same cubic easing as the camera. Author keys in
+  chronological order.
+- `oscillate`: a continuous wobble on one axis —
+  `{axis: x|y|rotate|scale, amplitude, period, phase}`. Amplitude is
+  normalized frame units for x/y (keep it small: 0.004-0.02), degrees for
+  rotate (2-6 reads well), scale delta for scale. `phase` (0-1) offsets the
+  cycle — give side-by-side wave strips different phases so they undulate
+  independently. Labels attached to a moving layer follow it automatically.
+
+Recipes:
+
+```json
+// A column of soldiers marching across the frame with a step-bob:
+{ "id": "column", "type": "layer", "asset_id": "legion_column",
+  "x": 0.0, "y": 0.62, "width": 0.5, "depth": 0.35, "z": 2,
+  "move": [ { "time": { "at_frac": 0.0 }, "x": -0.2 },
+            { "time": { "at_frac": 0.95 }, "x": 1.2 } ],
+  "oscillate": { "axis": "y", "amplitude": 0.006, "period": 0.7 } }
+```
+```json
+// A ship rocking as it sails in on the word "fleet":
+{ "id": "ship", "type": "layer", "asset_id": "warship_cutout",
+  "x": 1.0, "y": 0.55, "width": 0.35, "depth": 0.4, "z": 2,
+  "enter": { "at_word": "fleet", "offset": -0.3 },
+  "move": [ { "time": { "at_word": "fleet" }, "x": 1.25 },
+            { "time": { "at_frac": 1.0 }, "x": 0.35 } ],
+  "oscillate": { "axis": "rotate", "amplitude": 3.5, "period": 3.2 } }
+```
+```json
+// Ocean: two wave strips undulating out of phase behind/in front of the ship:
+{ "id": "wave_back", "type": "layer", "asset_id": "wave_strip",
+  "x": 0.45, "y": 0.8, "width": 1.25, "depth": 0.35, "z": 1,
+  "oscillate": { "axis": "y", "amplitude": 0.006, "period": 3.4, "phase": 0.45 } }
+```
+
 **label** — a torn-paper word chip, optionally pinned to another element.
 ```json
 { "id": "label_field", "type": "label", "text": "the field",

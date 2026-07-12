@@ -318,16 +318,20 @@ on-screen labels/dates/maps is the house style — every movement is authored, s
 nothing drifts or looks illogical. Reserve LTX "scene" clips for moments that
 genuinely need organic/photographic motion, or when the user asks for AI video.
 PACING: the screen must feel ALIVE the entire time — constant, purposeful
-motion. Concretely, in every collage scene: (1) the camera never fully stops —
-keep a slow drift, push, or parallax running at all times; (2) build scenes in
-DEPTH LAYERS (background/midground/foreground) moving at different rates;
-(3) something NEW happens every 2-4 seconds — an element enters or exits, a
-label/date/name stamps in, an arrow draws, a map region fills, a figure slides
-to a new position; (4) punctuate nearly every narrated claim with a visual
-response timed to its word (at_word) — dates, names, casualty counts, place
-labels; (5) NO composition may hold unchanged longer than ~4 seconds. A scene
-with one background and two cutouts drifting is NOT enough — layer 4-8 timed
-element events per scene minimum. Prefer `at_word`/`at_frac` TimeRefs over
+motion. Camera drift is the MINIMUM, not the goal: the SUBJECTS themselves
+must move. Concretely, in every collage scene: (1) give every living subject
+layer a `move` path and/or `oscillate` — columns of soldiers MARCH across the
+frame (x move + small y bob), ships SAIL in and rock (x move + rotate
+oscillation), seas UNDULATE (phased wave-strip oscillations), banners sway,
+crowds shift; (2) the camera never fully stops — keep a slow drift or push
+running under everything; (3) build scenes in DEPTH LAYERS moving at
+different rates; (4) something NEW happens every 2-4 seconds — an element
+enters/exits, a label/date/name stamps in, a map region fills, a subject
+arrives somewhere; (5) punctuate nearly every narrated claim with a visual
+response timed to its word (at_word); (6) NO composition may hold unchanged
+longer than ~4 seconds, and NO subject should be a frozen statue — layer 4-8
+timed element events per scene minimum, with subject motion running
+continuously between them. Prefer `at_word`/`at_frac` TimeRefs over
 absolute seconds; `at_word` refs REQUIRE align to have run first (whisper must be
 installed — there is no estimated fallback). Segments may declare `sfx` cues mixed
 under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",

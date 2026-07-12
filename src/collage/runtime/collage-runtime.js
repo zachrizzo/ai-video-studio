@@ -185,29 +185,77 @@
     node.appendChild(img);
     stage.appendChild(node);
 
+    // Subject motion: keyframed pose path (builder pre-resolves times and
+    // fills every field, so keys are dense) plus an optional closed-form
+    // oscillation. Everything stays a pure function of t.
+    var moveKeys = (el.move || []).slice().sort(function (a, b) {
+      return a.t - b.t;
+    });
+    function poseAt(t) {
+      var pose = { x: el.x, y: el.y, scale: el.scale, rotate: el.rotate };
+      if (moveKeys.length) {
+        var first = moveKeys[0];
+        var last = moveKeys[moveKeys.length - 1];
+        if (t <= first.t) {
+          pose = { x: first.x, y: first.y, scale: first.scale, rotate: first.rotate };
+        } else if (t >= last.t) {
+          pose = { x: last.x, y: last.y, scale: last.scale, rotate: last.rotate };
+        } else {
+          for (var i = 0; i < moveKeys.length - 1; i++) {
+            var a = moveKeys[i];
+            var b = moveKeys[i + 1];
+            if (t >= a.t && t <= b.t) {
+              var span = b.t - a.t;
+              var u = span > 0 ? easeInOut((t - a.t) / span) : 0;
+              pose = {
+                x: a.x + (b.x - a.x) * u,
+                y: a.y + (b.y - a.y) * u,
+                scale: a.scale + (b.scale - a.scale) * u,
+                rotate: a.rotate + (b.rotate - a.rotate) * u,
+              };
+              break;
+            }
+          }
+        }
+      }
+      var osc = el.oscillate;
+      if (osc) {
+        var w =
+          Math.sin((t / osc.period + (osc.phase || 0)) * 2 * Math.PI) *
+          osc.amplitude;
+        if (osc.axis === "x") pose.x += w;
+        else if (osc.axis === "y") pose.y += w;
+        else if (osc.axis === "rotate") pose.rotate += w;
+        else if (osc.axis === "scale") pose.scale = Math.max(0.01, pose.scale + w);
+      }
+      return pose;
+    }
+
     centers[el.id] = function (t) {
       var cam = cameraAt(t);
       var p = parallax(cam, el.depth);
-      return { x: el.x * FW + p.x, y: el.y * FH + p.y, depth: el.depth };
+      var pose = poseAt(t);
+      return { x: pose.x * FW + p.x, y: pose.y * FH + p.y, depth: el.depth };
     };
 
     renderers.push(function (t) {
       var env = envelope(t, el.enter, el.exit);
       var cam = cameraAt(t);
       var p = parallax(cam, el.depth);
-      node.style.left = el.x * FW + "px";
-      node.style.top = el.y * FH + "px";
+      var pose = poseAt(t);
+      node.style.left = pose.x * FW + "px";
+      node.style.top = pose.y * FH + "px";
       node.style.width = el.width * FW + "px";
       img.style.width = "100%";
       node.style.opacity = String(el.opacity * env.vis);
       node.style.transform = baseTransform(
-        el.x,
-        el.y,
+        pose.x,
+        pose.y,
         p.x,
         p.y,
         env.dy,
-        el.scale,
-        el.rotate
+        pose.scale,
+        pose.rotate
       );
       node.style.display = env.vis <= 0 ? "none" : "block";
     });

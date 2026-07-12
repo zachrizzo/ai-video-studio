@@ -252,6 +252,30 @@ def build_collage_html(
             "exit": opt_rt(el.exit),
         }
         if isinstance(el, LayerElement):
+            # Move keyframes: resolve TimeRefs to seconds and fill missing
+            # fields forward (first key inherits the layer's base pose), so
+            # the runtime only ever interpolates fully-specified poses.
+            move: list[dict[str, float]] = []
+            px, py = el.x, el.y
+            pscale, protate = el.scale, el.rotate
+            for key in el.move:
+                px = key.x if key.x is not None else px
+                py = key.y if key.y is not None else py
+                pscale = key.scale if key.scale is not None else pscale
+                protate = key.rotate if key.rotate is not None else protate
+                move.append(
+                    {"t": rt(key.time), "x": px, "y": py,
+                     "scale": pscale, "rotate": protate}
+                )
+            move.sort(key=lambda k: k["t"])
+            oscillate = None
+            if el.oscillate is not None:
+                oscillate = {
+                    "axis": el.oscillate.axis,
+                    "amplitude": el.oscillate.amplitude,
+                    "period": el.oscillate.period,
+                    "phase": el.oscillate.phase,
+                }
             base.update(
                 {
                     "assetUrl": asset_urls[el.asset_id],
@@ -263,6 +287,8 @@ def build_collage_html(
                     "rotate": el.rotate,
                     "opacity": el.opacity,
                     "z": el.z,
+                    "move": move,
+                    "oscillate": oscillate,
                 }
             )
         elif isinstance(el, LabelElement):

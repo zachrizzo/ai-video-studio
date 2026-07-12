@@ -35,12 +35,15 @@ DEFAULT_PRESETS = {
         "default_visual_engine": "collage",
         "video_speed": 1.25,
         "visual_pacing": (
-            "Constant purposeful motion — the camera never stops drifting; "
-            "depth layers (background/midground/foreground) move at different "
-            "rates; something new enters, exits, or transforms every 2-4 "
-            "seconds; dates, names, arrows, and map changes stamp in on the "
-            "exact narrated word. No composition holds unchanged longer than "
-            "4 seconds; 4-8 timed element events per scene minimum."
+            "The subjects themselves must move — camera drift is only the "
+            "baseline. Every living subject gets a move path and/or "
+            "oscillation: armies march across the frame with a step-bob, "
+            "ships sail in and rock on phased undulating waves, banners "
+            "sway, crowds shift. Something new enters, exits, or transforms "
+            "every 2-4 seconds; dates, names, and map changes stamp in on "
+            "the exact narrated word. No composition holds unchanged longer "
+            "than 4 seconds and no subject stands frozen; 4-8 timed events "
+            "per scene with continuous subject motion between them."
         ),
         "sfx_style": (
             "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "

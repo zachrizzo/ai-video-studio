@@ -361,3 +361,111 @@ def test_cmd_no_collage_work_skips(tmp_path: Path, capsys: pytest.CaptureFixture
     out = capsys.readouterr().out
     payload = json.loads([ln for ln in out.splitlines() if ln.strip().startswith("{")][-1])
     assert payload["skipped"] is True
+
+
+# ---------------------------------------------------------------------------
+# subject motion: move keyframes + oscillation
+# ---------------------------------------------------------------------------
+def test_layer_move_and_oscillate_compile(tmp_path: Path, style_pack: str) -> None:
+    run_dir = tmp_path / "run"
+    _make_png(run_dir / "assets" / "seg" / "ship.png")
+    spec_dict = {
+        "spec_version": 1,
+        "segment_id": "seg",
+        "duration_seconds": 10.0,
+        "fps": 30,
+        "style_pack": style_pack,
+        "assets": [{"id": "ship", "generate": {"prompt": "x", "width": 16, "height": 16}}],
+        "elements": [
+            {
+                "id": "ship_layer",
+                "type": "layer",
+                "asset_id": "ship",
+                "x": 0.9,
+                "y": 0.5,
+                "width": 0.4,
+                # keys authored with sparse fields: y inherits base, then the
+                # second key inherits the first key's y — fill-forward.
+                "move": [
+                    {"time": {"at_frac": 0.0}, "x": 1.2},
+                    {"time": {"at_frac": 0.8}, "x": 0.3, "rotate": 5.0},
+                ],
+                "oscillate": {"axis": "rotate", "amplitude": 3.0, "period": 3.0},
+            },
+        ],
+    }
+    (run_dir / "scenes").mkdir(parents=True, exist_ok=True)
+    (run_dir / "scenes" / "seg.collage.json").write_text(json.dumps(spec_dict))
+    spec = load_collage_spec(run_dir / "scenes" / "seg.collage.json")
+
+    html = build_collage_html(
+        spec=spec, run_dir=run_dir, narration_text="", duration_seconds=10.0, words=None
+    )
+
+    # move keys resolved to seconds with fill-forward pose fields
+    assert '"move":' in html
+    assert '"t": 0.0' in html and '"t": 8.0' in html
+    assert '"rotate": 5.0' in html  # second key's explicit rotate
+    # oscillation passes through
+    assert '"oscillate":' in html and '"axis": "rotate"' in html
+    # runtime motion machinery present
+    assert "poseAt" in html
+
+
+def test_oscillation_amplitude_limit_rejected() -> None:
+    from src.collage.spec import Oscillation
+
+    with pytest.raises(ValueError, match="amplitude"):
+        Oscillation(axis="y", amplitude=0.9, period=2.0)
+
+
+def test_moving_scene_renders_end_to_end(tmp_path: Path, style_pack: str) -> None:
+    """A spec using move+oscillate must build AND render through the real
+    headless renderer — proving the new runtime pose machinery executes under
+    the deterministic seek contract, not just that it serializes."""
+    from src.animation.html_renderer import render_html
+    from src.animation.models import SceneSpec as RenderSceneSpec
+
+    run_dir = tmp_path / "run"
+    _make_png(run_dir / "assets" / "seg" / "ship.png")
+    spec_dict = {
+        "spec_version": 1,
+        "segment_id": "seg",
+        "duration_seconds": 1.0,
+        "fps": 24,
+        "style_pack": style_pack,
+        "assets": [{"id": "ship", "generate": {"prompt": "x", "width": 16, "height": 16}}],
+        "elements": [
+            {
+                "id": "ship_layer",
+                "type": "layer",
+                "asset_id": "ship",
+                "x": 0.9, "y": 0.5, "width": 0.4,
+                "move": [
+                    {"time": {"at_frac": 0.0}, "x": 1.1},
+                    {"time": {"at_frac": 1.0}, "x": 0.2},
+                ],
+                "oscillate": {"axis": "rotate", "amplitude": 3.0, "period": 0.8},
+            },
+        ],
+    }
+    (run_dir / "scenes").mkdir(parents=True, exist_ok=True)
+    (run_dir / "scenes" / "seg.collage.json").write_text(json.dumps(spec_dict))
+    spec = load_collage_spec(run_dir / "scenes" / "seg.collage.json")
+    html = build_collage_html(
+        spec=spec, run_dir=run_dir, narration_text="", duration_seconds=1.0, words=None
+    )
+
+    work_dir = run_dir / "scenes" / "seg_render"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    scene = RenderSceneSpec(
+        segment_id="seg",
+        visual_engine="collage",
+        code=html,
+        target_duration_seconds=1.0,
+        narration_text="",
+        description="subject-motion render smoke",
+    )
+    result = render_html(scene, work_dir, (320, 180), 24, 120)
+    assert result.success, result.error_message
+    assert result.video_path.exists()
