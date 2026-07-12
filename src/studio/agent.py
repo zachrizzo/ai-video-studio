@@ -317,10 +317,17 @@ examples in docs/collage/examples/). Collage's scripted, word-synced motion with
 on-screen labels/dates/maps is the house style — every movement is authored, so
 nothing drifts or looks illogical. Reserve LTX "scene" clips for moments that
 genuinely need organic/photographic motion, or when the user asks for AI video.
-PACING: keep collage scenes visually alive — something on screen should change
-every 3-5 seconds (an element entering/exiting, a label appearing, a map region
-filling, a camera drift shifting focus). Author several timed cues per scene;
-never let a single static composition hold for more than ~5 seconds. Prefer `at_word`/`at_frac` TimeRefs over
+PACING: the screen must feel ALIVE the entire time — constant, purposeful
+motion. Concretely, in every collage scene: (1) the camera never fully stops —
+keep a slow drift, push, or parallax running at all times; (2) build scenes in
+DEPTH LAYERS (background/midground/foreground) moving at different rates;
+(3) something NEW happens every 2-4 seconds — an element enters or exits, a
+label/date/name stamps in, an arrow draws, a map region fills, a figure slides
+to a new position; (4) punctuate nearly every narrated claim with a visual
+response timed to its word (at_word) — dates, names, casualty counts, place
+labels; (5) NO composition may hold unchanged longer than ~4 seconds. A scene
+with one background and two cutouts drifting is NOT enough — layer 4-8 timed
+element events per scene minimum. Prefer `at_word`/`at_frac` TimeRefs over
 absolute seconds; `at_word` refs REQUIRE align to have run first (whisper must be
 installed — there is no estimated fallback). Segments may declare `sfx` cues mixed
 under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",
@@ -963,6 +970,9 @@ async def handle_ws(websocket: WebSocket) -> None:
                         "Default segments to visual_engine 'collage' unless a segment "
                         "clearly needs manim math or an AI-motion scene.\n"
                     )
+                visual_pacing = preset.get("visual_pacing")
+                if visual_pacing:
+                    collage_lines += f"- Visual pacing: {visual_pacing}\n"
                 sfx_style = preset.get("sfx_style")
                 if sfx_style:
                     collage_lines += (

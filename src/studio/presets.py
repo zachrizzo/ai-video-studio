@@ -34,6 +34,14 @@ DEFAULT_PRESETS = {
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
         "video_speed": 1.25,
+        "visual_pacing": (
+            "Constant purposeful motion — the camera never stops drifting; "
+            "depth layers (background/midground/foreground) move at different "
+            "rates; something new enters, exits, or transforms every 2-4 "
+            "seconds; dates, names, arrows, and map changes stamp in on the "
+            "exact narrated word. No composition holds unchanged longer than "
+            "4 seconds; 4-8 timed element events per scene minimum."
+        ),
         "sfx_style": (
             "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "
             "(-8..-12 dB), war_drums/ocean_waves/fire_crackle/wind_howl/bell_toll as "

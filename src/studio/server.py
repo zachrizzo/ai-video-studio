@@ -231,6 +231,7 @@ class PresetSaveRequest(BaseModel):
     kenburns_zoom: float | None = None
     qwen_model_size: str | None = None
     video_speed: float | None = None
+    visual_pacing: str | None = None
 
 class TTSRequest(BaseModel):
     text: str
