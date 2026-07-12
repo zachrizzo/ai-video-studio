@@ -108,7 +108,12 @@ def _text_similarity(expected: str, actual: str) -> float:
     actual_norm = _normalize_text(actual)
     if not expected_norm or not actual_norm:
         return 0.0
-    return difflib.SequenceMatcher(None, expected_norm, actual_norm).ratio()
+    # autojunk MUST stay off: its "popular character" heuristic treats any
+    # character occurring >1% of the time in a 200+ char string as junk and
+    # ignores it, which on long character-level transcripts collapses the ratio
+    # for near-identical text (e.g. 0.955 -> 0.015). That produced false
+    # transcript_mismatch failures on perfectly good, faithful voiceover.
+    return difflib.SequenceMatcher(None, expected_norm, actual_norm, autojunk=False).ratio()
 
 
 def _ffprobe_duration(path: Path) -> float | None:

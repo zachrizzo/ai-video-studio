@@ -417,3 +417,20 @@ def test_transcribe_voicebox_unreachable_is_actionable(tmp_path: Path, monkeypat
     assert "Voicebox /transcribe unreachable" in error
     assert "voicebox.sh" in error
     assert "PTV_QA_ASR_PROVIDER=cli" in error
+
+
+def test_text_similarity_no_autojunk_collapse() -> None:
+    """difflib's autojunk heuristic treats frequent characters as junk on long
+    strings, collapsing near-identical transcripts to ~0.0 similarity. QA must
+    keep autojunk off so faithful voiceover doesn't fail transcript checks."""
+    from src.qa.run_qa import _text_similarity
+
+    expected = (
+        "They say it began with two brothers and a she-wolf. In seven fifty "
+        "three before Christ, on seven hills above the river Tiber, a "
+        "settlement took root. Legend gave it Romulus, who killed his brother "
+        "Remus to rule alone, and gave the young city his name. Rome. A "
+        "village of shepherds that would one day command the whole known world."
+    )
+    actual = expected.replace("seven fifty three", "753").replace(". ", ".\n")
+    assert _text_similarity(expected, actual) > 0.9
