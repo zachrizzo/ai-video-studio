@@ -338,6 +338,16 @@ under narration: `"sfx": [{"sound": "cannon_boom", "at_word": "cannon",
 "gain_db": -10}]` — sounds are procedurally synthesized (%SFX_SOUNDS%);
 keep gains subtle (-18..-8 dB); at_word cues need align first.
 
+FILM FINISH (the Vox mixed-media look) — set these scene-level knobs on collage
+specs unless a scene is deliberately calm: (1) `"stutter_fps": 12` snaps the whole
+composite onto twos for a hand-animated, stop-motion cadence — drop it only for a
+settling outro; (2) `"lens": true` adds a periphery lens character (edge blur +
+faint chromatic fringe); (3) `"transition_in"` / `"transition_out"`
+(`{"seconds":0.5,"blur_px":14,"push":0.06}`) blur-and-push the camera at a scene
+boundary. Chain them: give a scene a `transition_out` and the NEXT scene a matching
+`transition_in` so the hard cut between clips reads as a tracking dissolve. See the
+FILM FINISH cookbook in docs/collage/AUTHORING.md.
+
 PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
 1. Before generating, write a structured `<run_dir>/script.json` that includes:
    subject, canonical_name, audience, style_bible, narration_style,
@@ -977,6 +987,9 @@ async def handle_ws(websocket: WebSocket) -> None:
                 visual_pacing = preset.get("visual_pacing")
                 if visual_pacing:
                     collage_lines += f"- Visual pacing: {visual_pacing}\n"
+                film_finish = preset.get("film_finish")
+                if film_finish:
+                    collage_lines += f"- Film finish: {film_finish}\n"
                 sfx_style = preset.get("sfx_style")
                 if sfx_style:
                     collage_lines += (

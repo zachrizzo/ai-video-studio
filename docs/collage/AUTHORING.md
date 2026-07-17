@@ -54,6 +54,44 @@ normalized). Times are interpolated with cubic in-out easing; before the first
 and after the last keyframe the value is clamped. Keep moves slow — a push from
 `scale 1.0` to `1.12` over the whole segment reads as calm and intentional.
 
+## Film finish (the Vox look)
+
+Three optional scene-level knobs push the render toward the Vox mixed-media
+explainer aesthetic. All three stay pure functions of `t` (seek-contract safe),
+and all are declared at the top level of the spec, not on elements.
+
+- `stutter_fps` (`12` | `15` | `24` | omit) — **motion on twos.** The file still
+  frame-renders at `fps`, but the time fed to every renderer snaps to
+  `floor(t*stutter_fps)/stutter_fps`, so the whole composite plays on a coarse,
+  hand-animated cadence. `12` is the classic Vox stutter. Omit it for a
+  deliberately smooth, calm scene.
+- `lens` (`true` | `false`, default `false`) — adds a **periphery lens
+  character**: a subtle edge blur plus a faint red/cyan chromatic fringe masked
+  to the frame border (the centre stays crisp). Constant in `t`.
+- `transition_in` / `transition_out` — a **blur-masked camera push** at the
+  scene's boundary. Each is `{seconds, blur_px, push}` (defaults `0.5`, `14`,
+  `0.06`). `transition_in` peaks at `t=0` and clears over `seconds`;
+  `transition_out` is clear until `duration-seconds` then peaks at the end.
+  Scenes are hard-cut concatenated, so there is no true cross-dissolve — instead
+  give scene A a `transition_out` and scene B a **matching** `transition_in`, and
+  the cut lands between two blurred, pushed frames so it reads as a tracking
+  transition. The blur masking the cut is what sells it.
+
+```json
+// A scene that stutters on twos, carries lens character, and blur-pushes out of
+// its tail so the next scene can blur-push in and hide the cut:
+{
+  "spec_version": 1,
+  "segment_id": "seg03",
+  "duration_seconds": 12.0,
+  "stutter_fps": 12,
+  "lens": true,
+  "transition_in": { "seconds": 0.5, "blur_px": 14, "push": 0.06 },
+  "transition_out": { "seconds": 0.5, "blur_px": 14, "push": 0.06 },
+  "elements": [ "..." ]
+}
+```
+
 ## Style tokens
 
 Colours may be raw CSS (`"#D97757"`, `"rgba(0,0,0,0.4)"`) or a **palette token**

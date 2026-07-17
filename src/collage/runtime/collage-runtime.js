@@ -107,6 +107,33 @@
     return { x: last.x, y: last.y, scale: last.scale };
   }
 
+  // ---- transition envelopes ----------------------------------------------
+  // Blur-masked camera-push at the scene boundaries. transitionIn peaks at t=0
+  // and clears over `seconds`; transitionOut is clear until DURATION-seconds and
+  // peaks at the end. Two adjacent scenes both carrying an envelope meet at the
+  // hard cut already blurred + pushed, so the cut reads as a tracking dissolve.
+  var TR_IN = SCENE.transitionIn || null;
+  var TR_OUT = SCENE.transitionOut || null;
+  // Returns additive {blur (px), push (scale)} contributed by the envelopes.
+  function transitionAt(t) {
+    var blur = 0;
+    var push = 0;
+    if (TR_IN && TR_IN.seconds > 0 && t < TR_IN.seconds) {
+      var ui = 1 - easeInOut(clamp01(t / TR_IN.seconds)); // 1 at t=0 -> 0
+      blur += TR_IN.blurPx * ui;
+      push += TR_IN.push * ui;
+    }
+    if (TR_OUT && TR_OUT.seconds > 0) {
+      var startO = DURATION - TR_OUT.seconds;
+      if (t > startO) {
+        var uo = easeInOut(clamp01((t - startO) / TR_OUT.seconds)); // 0 -> 1 at end
+        blur += TR_OUT.blurPx * uo;
+        push += TR_OUT.push * uo;
+      }
+    }
+    return { blur: blur, push: push };
+  }
+
   // Parallax offset (px) for an element at the given depth, given the camera.
   // camera_offset = camera center displacement from (0.5, 0.5); depth 0 = locked
   // to the camera (no parallax), depth 1 = full parallax (moves opposite to the
@@ -693,11 +720,14 @@
     buildMask(masks[m], nodeById2[masks[m].target]);
   }
 
-  // ---- camera scale on the stage ------------------------------------------
+  // ---- camera scale on the stage + transition blur/push -------------------
   renderers.push(function (t) {
     var cam = cameraAt(t);
+    var tr = transitionAt(t);
     stage.style.transformOrigin = "50% 50%";
-    stage.style.transform = "scale(" + cam.scale + ")";
+    stage.style.transform = "scale(" + (cam.scale + tr.push) + ")";
+    // Frame blur masks the hard cut at scene boundaries (whole composite).
+    frame.style.filter = tr.blur > 0.01 ? "blur(" + tr.blur.toFixed(2) + "px)" : "none";
   });
 
   // ---- global finish: grain + vignette ------------------------------------
@@ -715,11 +745,28 @@
     var vig = document.createElement("div");
     vig.className = "collage-vignette";
     frame.appendChild(vig);
+
+    // Optional lens character: a periphery-masked overlay carrying an edge blur
+    // (backdrop-filter) and a faint red/cyan chromatic fringe. Constant in t —
+    // the composition is flat art, so, like the reference AE technique, the
+    // aberration is masked to the frame edges rather than applied full-frame.
+    if (SCENE.lens) {
+      var lens = document.createElement("div");
+      lens.className = "collage-lens";
+      frame.appendChild(lens);
+    }
   })();
 
   // ---- seek: the pure function of t ---------------------------------------
+  // "Motion on twos": when stutterFps is set, the whole composite samples on a
+  // coarse cadence (floor(t*fps)/fps) while the file still frame-renders at the
+  // real fps — the stuttered, hand-animated Vox look. Still a pure function of t.
+  var STUTTER = SCENE.stutterFps || 0;
   function seek(t) {
     var tc = clamp(t, 0, DURATION);
+    if (STUTTER > 0) {
+      tc = Math.floor(tc * STUTTER) / STUTTER;
+    }
     for (var i = 0; i < renderers.length; i++) {
       renderers[i](tc);
     }

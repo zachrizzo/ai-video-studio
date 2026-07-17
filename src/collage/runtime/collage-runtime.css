@@ -194,3 +194,21 @@ html, body {
     rgba(31, 30, 27, 0.22) 100%
   );
 }
+
+/* ---- optional lens character (edge blur + chromatic fringe) ---- */
+/* Masked to the periphery so the centre stays crisp; the backdrop blur softens
+ * the edges like a real lens and the offset red/cyan gradients read as faint
+ * chromatic aberration around the frame border. Constant — no t dependence. */
+.collage-lens {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 10000;
+  -webkit-backdrop-filter: blur(3px);
+  backdrop-filter: blur(3px);
+  background:
+    radial-gradient(120% 120% at 47% 50%, rgba(0, 170, 255, 0) 76%, rgba(0, 170, 255, 0.13) 100%),
+    radial-gradient(120% 120% at 53% 50%, rgba(255, 40, 40, 0) 76%, rgba(255, 40, 40, 0.13) 100%);
+  -webkit-mask-image: radial-gradient(ellipse 72% 72% at center, rgba(0,0,0,0) 60%, #000 92%);
+  mask-image: radial-gradient(ellipse 72% 72% at center, rgba(0,0,0,0) 60%, #000 92%);
+}

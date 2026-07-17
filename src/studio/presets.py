@@ -45,6 +45,13 @@ DEFAULT_PRESETS = {
             "than 4 seconds and no subject stands frozen; 4-8 timed events "
             "per scene with continuous subject motion between them."
         ),
+        "film_finish": (
+            "Give scenes the Vox film finish: set stutter_fps 12 (motion on twos) "
+            "and lens true on every scene, and chain transition_out -> the next "
+            "scene's transition_in ({seconds:0.5, blur_px:14, push:0.06}) so hard "
+            "cuts read as blur-masked tracking dissolves. Ease off stutter only for "
+            "a deliberately calm closing scene."
+        ),
         "sfx_style": (
             "Layer battle sfx under narration: cannon_boom/musket_volley pinned at_word "
             "(-8..-12 dB), war_drums/ocean_waves/fire_crackle/wind_howl/bell_toll as "
@@ -112,6 +119,13 @@ DEFAULT_PRESETS = {
         "voicebox_profile": "Eric",
         "style_pack": "anthropic_docu",
         "default_visual_engine": "collage",
+        "film_finish": (
+            "Give scenes the Vox film finish: stutter_fps 12 (motion on twos) and "
+            "lens true, and chain transition_out -> the next scene's transition_in "
+            "({seconds:0.6, blur_px:12, push:0.05}) so cuts read as soft tracking "
+            "dissolves. This style is calmer — a gentle push is enough; ease off "
+            "stutter for a settling closing scene."
+        ),
         "sfx_style": (
             "Subtle procedural sfx under narration: ambience (ocean_waves, wind_howl, "
             "fire_crackle, war_drums) at_frac 0 at -16..-20 dB; hits (cannon_boom, "

@@ -271,6 +271,24 @@ class CameraKeyframe(_Frozen):
     scale: float = Field(default=1.0, gt=0, le=2)
 
 
+class Transition(_Frozen):
+    """A blur-masked, camera-pushed transition envelope at a scene boundary.
+
+    Scenes are hard-cut concatenated, so a true cross-dissolve is impossible
+    without desyncing the separately-concatenated narration. Instead each scene
+    blurs and pushes the camera over ``seconds`` at its own boundary: a
+    ``transition_in`` peaks at t=0 and clears by ``seconds``; a
+    ``transition_out`` is clear until ``duration - seconds`` and peaks at the
+    end. Two adjacent scenes that both carry a matching envelope meet at the
+    cut already blurred and motion-matched, so the hard cut reads as a Vox
+    tracking transition. Everything is a pure function of t (seek-contract safe).
+    """
+
+    seconds: float = Field(default=0.5, gt=0, le=3)  # ramp length at the boundary
+    blur_px: float = Field(default=14.0, ge=0, le=60)  # peak frame blur
+    push: float = Field(default=0.06, ge=0, le=0.5)  # extra camera scale at the peak
+
+
 class CollageSpec(_Frozen):
     spec_version: Literal[1]
     segment_id: str
@@ -280,6 +298,16 @@ class CollageSpec(_Frozen):
     fps: Literal[24, 30, 60] = 30
     background: str = "$palette.paper"
     style_pack: str | None = None  # defaults to the script-level style_pack
+    # ---- Vox finishing knobs (all opt-in; see docs/collage/AUTHORING.md) ----
+    # Quantize the whole composite onto this cadence ("motion on twos"). The
+    # file still renders at ``fps``; only the time fed to every renderer snaps
+    # to ``floor(t*stutter_fps)/stutter_fps``. 12 is the canonical Vox cadence.
+    stutter_fps: Literal[12, 15, 24] | None = None
+    # Add a periphery lens character (edge blur + faint chromatic fringe).
+    lens: bool = False
+    # Blur-masked camera-push envelopes at the scene boundaries.
+    transition_in: Transition | None = None
+    transition_out: Transition | None = None
     camera: list[CameraKeyframe] = []
     assets: list[CollageAsset] = []
     elements: list[CollageElement] = Field(min_length=1)

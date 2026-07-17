@@ -362,6 +362,11 @@ def build_collage_html(
 
     _role_family, font_css, families = _resolve_fonts(spec, pack)
 
+    def _transition(tr) -> dict[str, float] | None:
+        if tr is None:
+            return None
+        return {"seconds": tr.seconds, "blurPx": tr.blur_px, "push": tr.push}
+
     scene = {
         "duration": duration_seconds,
         "fps": spec.fps,
@@ -369,6 +374,11 @@ def build_collage_html(
         "fonts": families,
         "camera": camera,
         "elements": compiled,
+        # Vox finishing knobs (opt-in; null/false when unused).
+        "stutterFps": spec.stutter_fps,
+        "lens": spec.lens,
+        "transitionIn": _transition(spec.transition_in),
+        "transitionOut": _transition(spec.transition_out),
     }
 
     runtime_css = (_RUNTIME_DIR / "collage-runtime.css").read_text()
