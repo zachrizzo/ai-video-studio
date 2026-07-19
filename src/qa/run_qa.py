@@ -27,6 +27,18 @@ from src.config import PipelineConfig
 from src.visuals.beats import beat_clip_path, beat_image_path, segment_visual_beats
 
 
+class ProbeError(Exception):
+    """An ffmpeg media probe could not be completed.
+
+    Raised when the probe itself failed — corrupt/unreadable media, an ffmpeg
+    crash, a missing ffmpeg binary, or a timeout — as distinct from a probe
+    that ran cleanly and found nothing wrong. Callers turn this into an
+    explicit ``error``-severity "could not verify …" finding so the release
+    gate never reports a clean result (loudness OK / no black frames / no
+    freezes) for an artifact it was never actually able to inspect.
+    """
+
+
 RISKY_MOTION_KEYWORDS = {
     "bird",
     "birds",
@@ -60,6 +72,76 @@ TEXT_RISK_KEYWORDS = {
     "banners",
     "map",
 }
+
+
+# ---------------------------------------------------------------------------
+# Narration voice: mechanical AI-tell detection (docs/script-voice.md).
+# Only the objectively detectable subset is linted — the full voice contract
+# lives in the doc and the producer brief. Findings are ALWAYS warnings:
+# style is judgment; the lint exists to catch pattern regressions, not to gate.
+# ---------------------------------------------------------------------------
+_VOICE_COLON_REVEAL = re.compile(
+    r"^\s*(first up|next up|up next|story \w+|number \w+)\s*:", re.IGNORECASE
+)
+_VOICE_LABELED_RHETORIC = re.compile(
+    r"\bthe (hook|kicker|twist|catch|takeaway|bottom line)\s*:", re.IGNORECASE
+)
+_VOICE_ONE_MESSAGE = re.compile(
+    r"\bone (message|takeaway|lesson|theme|story)\s*:", re.IGNORECASE
+)
+_VOICE_EDITORIAL_PROCESS = (
+    "fact-checked", "fact checked", "cross-checked", "cross checked",
+    "every claim", "only reported", "actually confirmed", "we verified",
+)
+_VOICE_EXPLICIT_NUANCE = (
+    "note what it's not", "important nuance", "worth noting", "it should be noted",
+)
+
+
+def detect_ai_tells(segments: list[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Scan (segment_id, narration_text) pairs for the AI-writing tells that are
+    mechanically detectable. Returns finding dicts {id, message, segment_id?}."""
+    tells: list[dict[str, Any]] = []
+
+    def hit(check_id: str, message: str, segment_id: str | None = None) -> None:
+        tells.append({"id": check_id, "message": message, "segment_id": segment_id})
+
+    for seg_id, text in segments:
+        low = text.lower()
+        if _VOICE_COLON_REVEAL.search(text):
+            hit("voice.colon_reveal", "Colon-reveal opener ('First up:', 'Story three:') — "
+                "announce nothing; just start the story.", seg_id)
+        if _VOICE_LABELED_RHETORIC.search(text):
+            hit("voice.labeled_rhetoric", "Labels its own rhetoric ('The hook:') — "
+                "deliver the hook instead of naming it.", seg_id)
+        if _VOICE_ONE_MESSAGE.search(text):
+            hit("voice.one_message", "'X, one message: Y' summarizer construction — "
+                "humans under-summarize; cut the thesis sentence.", seg_id)
+        for phrase in _VOICE_EDITORIAL_PROCESS:
+            if phrase in low:
+                hit("voice.editorial_process", f"Editorial-process language on air ('{phrase}') — "
+                    "describe the story, never the research behind it.", seg_id)
+                break
+        for phrase in _VOICE_EXPLICIT_NUANCE:
+            if phrase in low:
+                hit("voice.explicit_nuance", f"Explicit-nuance lecture ('{phrase}') — "
+                    "just say the true thing plainly.", seg_id)
+                break
+
+    total_words = sum(len(t.split()) for _, t in segments)
+    if total_words >= 40 and not any("?" in t for _, t in segments):
+        hit("voice.no_questions", "No questions anywhere in the narration — pure declarative "
+            "wire copy reads synthetic in a hosted format; ask the viewer something.")
+
+    counts = [len(t.split()) for _, t in segments if t.strip()]
+    if len(counts) >= 6:
+        mean = sum(counts) / len(counts)
+        if mean > 0:
+            spread = (max(counts) - min(counts)) / mean
+            if spread < 0.25:
+                hit("voice.uniform_length", "Every segment is nearly the same length — vary "
+                    "story shapes (quick hits vs deep dives); uniformity itself is a tell.")
+    return tells
 
 
 @dataclass
@@ -116,84 +198,136 @@ def _text_similarity(expected: str, actual: str) -> float:
     return difflib.SequenceMatcher(None, expected_norm, actual_norm, autojunk=False).ratio()
 
 
-def _ffprobe_duration(path: Path) -> float | None:
+def _ffprobe_duration(path: Path) -> float:
+    """Container duration (seconds) for *path*.
+
+    Raises :class:`ProbeError` when the probe cannot run — a missing file,
+    corrupt/unreadable media, an ffprobe crash/missing binary, or output that
+    is not a parseable duration. A successful probe always returns a float, so
+    callers can tell "could not measure" from a genuine value instead of
+    silently skipping a duration/drift/sync check on an artifact they never
+    actually read.
+    """
     if not path.exists():
-        return None
-    proc = _run(
-        [
-            "ffprobe",
-            "-v",
-            "error",
-            "-show_entries",
-            "format=duration",
-            "-of",
-            "default=noprint_wrappers=1:nokey=1",
-            str(path),
-        ],
-        timeout=20,
-    )
+        raise ProbeError(f"media file does not exist: {path}")
+    try:
+        proc = _run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(path),
+            ],
+            timeout=20,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProbeError(f"ffprobe duration could not run on {path}: {exc}") from exc
     if proc.returncode != 0:
-        return None
+        tail = (proc.stderr or proc.stdout or "")[-300:]
+        raise ProbeError(f"ffprobe duration failed (exit {proc.returncode}) on {path}: {tail}")
     try:
         return float(proc.stdout.strip())
-    except ValueError:
-        return None
+    except ValueError as exc:
+        raise ProbeError(f"ffprobe returned an unparseable duration on {path}: {exc}") from exc
 
 
 def _probe_loudness(path: Path) -> dict[str, float] | None:
+    """Integrated-loudness stats for *path*.
+
+    Returns the parsed stats on success, or ``None`` when ffmpeg ran cleanly
+    but the input carries no audio stream to measure (nothing to check —
+    missing narration is caught by other checks). Raises :class:`ProbeError`
+    when the probe itself fails (corrupt/unreadable media, ffmpeg crash/missing
+    binary, timeout), so callers can distinguish "could not verify" from "OK".
+    """
     if not path.exists():
-        return None
-    proc = _run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostats",
-            "-i",
-            str(path),
-            "-af",
-            "loudnorm=I=-16:LRA=11:TP=-1.5:print_format=json",
-            "-f",
-            "null",
-            "-",
-        ],
-        timeout=180,
-    )
+        raise ProbeError(f"media file does not exist: {path}")
+    try:
+        proc = _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-af",
+                "loudnorm=I=-16:LRA=11:TP=-1.5:print_format=json",
+                "-f",
+                "null",
+                "-",
+            ],
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProbeError(f"ffmpeg loudness probe could not run on {path}: {exc}") from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "")[-300:]
+        raise ProbeError(
+            f"ffmpeg loudness probe failed (exit {proc.returncode}) on {path}: {tail}"
+        )
     text = proc.stderr or proc.stdout
     match = re.search(r"\{\s*\"input_i\".*?\}", text, flags=re.S)
-    if proc.returncode != 0 or not match:
+    if not match:
+        # Clean exit with no loudnorm block => the input has no audio stream to
+        # measure. Not a probe failure; there is simply nothing to check here.
         return None
     try:
         raw = json.loads(match.group(0))
-    except json.JSONDecodeError:
-        return None
+    except json.JSONDecodeError as exc:
+        raise ProbeError(
+            f"ffmpeg loudness probe returned unparseable JSON on {path}: {exc}"
+        ) from exc
     out: dict[str, float] = {}
     for key in ("input_i", "input_tp", "input_lra", "input_thresh"):
         try:
             out[key] = float(raw[key])
         except (KeyError, TypeError, ValueError):
             pass
+    if "input_i" not in out:
+        raise ProbeError(
+            f"ffmpeg loudness probe produced no integrated-loudness value on {path}"
+        )
     return out
 
 
 def _detect_video_events(path: Path, vf: str, pattern: str) -> list[dict[str, float]]:
+    """Parsed ffmpeg video-filter events for *path*.
+
+    An empty list means the filter ran and found nothing (a genuine pass).
+    Raises :class:`ProbeError` when the probe itself fails (corrupt/unreadable
+    media, ffmpeg crash/missing binary, timeout), so callers can distinguish
+    "could not verify" from "no events found".
+    """
     if not path.exists():
-        return []
-    proc = _run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostats",
-            "-i",
-            str(path),
-            "-vf",
-            vf,
-            "-an",
-            "-f",
-            "null",
-            "-",
-        ],
-        timeout=240,
-    )
+        raise ProbeError(f"media file does not exist: {path}")
+    try:
+        proc = _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-vf",
+                vf,
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ],
+            timeout=240,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProbeError(f"ffmpeg video probe could not run on {path}: {exc}") from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "")[-300:]
+        raise ProbeError(
+            f"ffmpeg video probe failed (exit {proc.returncode}) on {path}: {tail}"
+        )
     events: list[dict[str, float]] = []
     for match in re.finditer(pattern, proc.stderr or proc.stdout):
         event: dict[str, float] = {}
@@ -387,22 +521,32 @@ def _luma_stddev_series(path: Path) -> list[tuple[float, float]]:
     luma variance, so they land ABOVE the tiny threshold and are NOT treated as
     blank.
     """
-    proc = _run(
-        [
-            "ffmpeg",
-            "-hide_banner",
-            "-nostats",
-            "-i",
-            str(path),
-            "-vf",
-            "signalstats,metadata=print",
-            "-an",
-            "-f",
-            "null",
-            "-",
-        ],
-        timeout=240,
-    )
+    if not path.exists():
+        raise ProbeError(f"media file does not exist: {path}")
+    try:
+        proc = _run(
+            [
+                "ffmpeg",
+                "-hide_banner",
+                "-nostats",
+                "-i",
+                str(path),
+                "-vf",
+                "signalstats,metadata=print",
+                "-an",
+                "-f",
+                "null",
+                "-",
+            ],
+            timeout=240,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise ProbeError(f"ffmpeg signalstats probe could not run on {path}: {exc}") from exc
+    if proc.returncode != 0:
+        tail = (proc.stderr or proc.stdout or "")[-300:]
+        raise ProbeError(
+            f"ffmpeg signalstats probe failed (exit {proc.returncode}) on {path}: {tail}"
+        )
     text = (proc.stderr or "") + (proc.stdout or "")
     times = [float(m) for m in re.findall(r"pts_time:(\d+(?:\.\d+)?)", text)]
     ymins = [float(m) for m in re.findall(r"lavfi\.signalstats\.YMIN=(\d+(?:\.\d+)?)", text)]
@@ -439,7 +583,20 @@ def _scene_render_checks(
     seg_id = getattr(segment, "segment_id", "")
 
     # --- Scene duration drift (CONTRACTS §7) ---
-    video_duration = _ffprobe_duration(scene_video)
+    try:
+        video_duration: float | None = _ffprobe_duration(scene_video)
+    except ProbeError as exc:
+        add(
+            Check(
+                "scene.duration_unverified",
+                "error",
+                "Could not verify frame-rendered scene duration — the video could not be probed.",
+                seg_id,
+                str(scene_video),
+                {"engine": engine, "error": str(exc)},
+            )
+        )
+        video_duration = None
     audio_entry = audio_manifest.get(seg_id) or {}
     target = float(audio_entry.get("duration_seconds") or 0) or float(
         getattr(segment, "estimated_duration_seconds", 0) or 0
@@ -470,24 +627,37 @@ def _scene_render_checks(
 
     # --- Blank-frame check (collage + html scene renders only) ---
     if engine in ("collage", "html"):
-        series = _luma_stddev_series(scene_video)
-        blank_run = _max_blank_run_seconds(series, config.qa_min_luma_stddev)
-        if blank_run > config.qa_max_blank_seconds:
+        try:
+            series = _luma_stddev_series(scene_video)
+        except ProbeError as exc:
             add(
                 Check(
-                    "scene.blank_frames",
+                    "scene.blank_frames_unverified",
                     "error",
-                    "Frame-rendered scene holds strictly-uniform (blank) frames for too long.",
+                    "Could not verify blank frames — the scene video could not be probed.",
                     seg_id,
                     str(scene_video),
-                    {
-                        "engine": engine,
-                        "blank_seconds": blank_run,
-                        "max_blank_seconds": config.qa_max_blank_seconds,
-                        "luma_stddev_threshold": config.qa_min_luma_stddev,
-                    },
+                    {"engine": engine, "error": str(exc)},
                 )
             )
+        else:
+            blank_run = _max_blank_run_seconds(series, config.qa_min_luma_stddev)
+            if blank_run > config.qa_max_blank_seconds:
+                add(
+                    Check(
+                        "scene.blank_frames",
+                        "error",
+                        "Frame-rendered scene holds strictly-uniform (blank) frames for too long.",
+                        seg_id,
+                        str(scene_video),
+                        {
+                            "engine": engine,
+                            "blank_seconds": blank_run,
+                            "max_blank_seconds": config.qa_max_blank_seconds,
+                            "luma_stddev_threshold": config.qa_min_luma_stddev,
+                        },
+                    )
+                )
 
 
 def _status_for(checks: list[Check]) -> str:
@@ -532,6 +702,9 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
         )
     if not script.style_bible:
         add(Check("script.style_bible_missing", "warning", "No style_bible set; continuity QA is weaker."))
+    # Narration voice lint (docs/script-voice.md) — warnings only, never gating.
+    for tell in detect_ai_tells([(s.segment_id, s.narration_text) for s in script.segments]):
+        add(Check(tell["id"], "warning", tell["message"], segment_id=tell.get("segment_id")))
     if not script.release_acceptance_criteria:
         add(
             Check(
@@ -706,7 +879,14 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
             add(Check("audio.file_missing", "error", "Missing audio file.", seg_id, str(audio_path)))
             continue
 
-        actual_duration = _ffprobe_duration(audio_path) or float(audio_entry.get("duration_seconds", 0) or 0)
+        # If ffprobe cannot read the file, fall back to the manifest's recorded
+        # duration for the drift heuristic — the unreadability itself is surfaced
+        # as an explicit error by the loudness probe just below.
+        try:
+            probed_duration = _ffprobe_duration(audio_path)
+        except ProbeError:
+            probed_duration = None
+        actual_duration = probed_duration or float(audio_entry.get("duration_seconds", 0) or 0)
         estimated = float(seg.estimated_duration_seconds or 0)
         if estimated > 0:
             ratio = actual_duration / estimated if estimated else 1.0
@@ -730,40 +910,68 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
                     )
                 )
 
-        loudness = _probe_loudness(audio_path)
-        if loudness and "input_i" in loudness:
-            integrated = loudness["input_i"]
-            if integrated < config.qa_min_lufs or integrated > config.qa_max_lufs:
-                add(
-                    Check(
-                        "audio.segment_loudness",
-                        "warning",
-                        "Segment loudness is outside the target web playback range.",
-                        seg_id,
-                        str(audio_path),
-                        {"input_i_lufs": integrated, "target_lufs": config.qa_target_lufs},
-                    )
+        try:
+            loudness = _probe_loudness(audio_path)
+        except ProbeError as exc:
+            add(
+                Check(
+                    "audio.loudness_unverified",
+                    "error",
+                    "Could not verify segment loudness — the audio could not be probed.",
+                    seg_id,
+                    str(audio_path),
+                    {"error": str(exc)},
                 )
+            )
+        else:
+            if loudness is not None:
+                integrated = loudness["input_i"]
+                if integrated < config.qa_min_lufs or integrated > config.qa_max_lufs:
+                    add(
+                        Check(
+                            "audio.segment_loudness",
+                            "warning",
+                            "Segment loudness is outside the target web playback range.",
+                            seg_id,
+                            str(audio_path),
+                            {"input_i_lufs": integrated, "target_lufs": config.qa_target_lufs},
+                        )
+                    )
 
         if config.qa_require_asr or strict or _asr_available(asr_command):
             transcript, error = _transcribe(audio_path, config)
-            if transcript:
-                similarity = _text_similarity(seg.narration_text, transcript)
-                if similarity < config.qa_min_transcript_similarity:
+            if transcript is not None:
+                # ASR ran successfully. An EMPTY result is not a pass: the
+                # narration transcribes to nothing (silent or unintelligible
+                # audio) — a real defect that must be flagged, not swallowed by
+                # `if transcript:` treating "" as falsy.
+                if not transcript.strip():
                     add(
                         Check(
-                            "audio.transcript_mismatch",
+                            "audio.transcript_empty",
                             "error",
-                            "ASR transcript does not match narration; voiceover may be garbled or missing text.",
+                            "ASR ran but produced no transcript; the narration audio is silent or unintelligible.",
                             seg_id,
                             str(audio_path),
-                            {
-                                "similarity": similarity,
-                                "expected": seg.narration_text[:500],
-                                "actual": transcript[:500],
-                            },
                         )
                     )
+                else:
+                    similarity = _text_similarity(seg.narration_text, transcript)
+                    if similarity < config.qa_min_transcript_similarity:
+                        add(
+                            Check(
+                                "audio.transcript_mismatch",
+                                "error",
+                                "ASR transcript does not match narration; voiceover may be garbled or missing text.",
+                                seg_id,
+                                str(audio_path),
+                                {
+                                    "similarity": similarity,
+                                    "expected": seg.narration_text[:500],
+                                    "actual": transcript[:500],
+                                },
+                            )
+                        )
             elif config.qa_require_asr or strict:
                 add(Check("audio.asr_failed", "error", error or "ASR failed.", seg_id, str(audio_path)))
             elif error:
@@ -771,7 +979,10 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
 
     final_video = run_dir / "final.mp4"
     if not final_video.exists():
-        add(Check("final.missing", "warning", "No final.mp4 found in run directory.", path=str(final_video)))
+        # Total absence of the deliverable is an error like every other
+        # *_missing check — a warning would let cmd_qa exit 0 on a run with no
+        # final.mp4, reporting a pass for output that does not exist.
+        add(Check("final.missing", "error", "No final.mp4 found in run directory.", path=str(final_video)))
     else:
         # --- A/V sync: final duration must cover the full narration ---
         # The compositor's AV merge uses ffmpeg -shortest, which silently
@@ -784,7 +995,19 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
             for key, entry in audio_manifest.items()
             if not key.startswith("_") and isinstance(entry, dict) and not entry.get("failed")
         )
-        final_duration = _ffprobe_duration(final_video)
+        try:
+            final_duration: float | None = _ffprobe_duration(final_video)
+        except ProbeError as exc:
+            add(
+                Check(
+                    "final.av_sync_unverified",
+                    "error",
+                    "Could not verify final video A/V sync — the final duration could not be probed.",
+                    path=str(final_video),
+                    details={"error": str(exc)},
+                )
+            )
+            final_duration = None
         # Prefer the speed cmd_composite actually applied (persisted to
         # composite_meta.json). The --speed flag overrides config.video_speed,
         # so trusting the config default alone falsely flags a speed-adjusted
@@ -825,55 +1048,91 @@ def qa_run(run_dir: Path, *, strict: bool = False) -> dict[str, Any]:
                     )
                 )
 
-        final_loudness = _probe_loudness(final_video)
-        if final_loudness and "input_i" in final_loudness:
-            integrated = final_loudness["input_i"]
-            if integrated < config.qa_min_lufs or integrated > config.qa_max_lufs:
-                add(
-                    Check(
-                        "final.loudness",
-                        "error",
-                        "Final video loudness is outside the target web playback range.",
-                        path=str(final_video),
-                        details={"input_i_lufs": integrated, "target_lufs": config.qa_target_lufs},
-                    )
-                )
-
-        black_events = _detect_video_events(
-            final_video,
-            "blackdetect=d=0.5:pix_th=0.10",
-            r"black_start:(?P<start>\d+(?:\.\d+)?) black_end:(?P<end>\d+(?:\.\d+)?) black_duration:(?P<duration>\d+(?:\.\d+)?)",
-        )
-        for event in black_events:
+        try:
+            final_loudness = _probe_loudness(final_video)
+        except ProbeError as exc:
             add(
                 Check(
-                    "final.black_frames",
-                    "warning",
-                    "Final video contains a black-frame interval.",
+                    "final.loudness_unverified",
+                    "error",
+                    "Could not verify final video loudness — the audio could not be probed.",
                     path=str(final_video),
-                    details=event,
+                    details={"error": str(exc)},
                 )
             )
+        else:
+            if final_loudness is not None:
+                integrated = final_loudness["input_i"]
+                if integrated < config.qa_min_lufs or integrated > config.qa_max_lufs:
+                    add(
+                        Check(
+                            "final.loudness",
+                            "error",
+                            "Final video loudness is outside the target web playback range.",
+                            path=str(final_video),
+                            details={"input_i_lufs": integrated, "target_lufs": config.qa_target_lufs},
+                        )
+                    )
+
+        try:
+            black_events = _detect_video_events(
+                final_video,
+                "blackdetect=d=0.5:pix_th=0.10",
+                r"black_start:(?P<start>\d+(?:\.\d+)?) black_end:(?P<end>\d+(?:\.\d+)?) black_duration:(?P<duration>\d+(?:\.\d+)?)",
+            )
+        except ProbeError as exc:
+            add(
+                Check(
+                    "final.black_frames_unverified",
+                    "error",
+                    "Could not verify black frames — the final video could not be probed.",
+                    path=str(final_video),
+                    details={"error": str(exc)},
+                )
+            )
+        else:
+            for event in black_events:
+                add(
+                    Check(
+                        "final.black_frames",
+                        "warning",
+                        "Final video contains a black-frame interval.",
+                        path=str(final_video),
+                        details=event,
+                    )
+                )
 
         # NOTE: freezedetect warnings on deliberate calm holds (>=2.5s static
         # shots — a paused diagram, a held beat) are EXPECTED and must stay
         # warnings, never errors. They flag "is this intentional?" for a human,
         # not a defect.
-        freeze_events = _detect_video_events(
-            final_video,
-            "freezedetect=n=-60dB:d=3",
-            r"freeze_start: (?P<start>\d+(?:\.\d+)?).*?freeze_duration: (?P<duration>\d+(?:\.\d+)?)",
-        )
-        for event in freeze_events:
+        try:
+            freeze_events = _detect_video_events(
+                final_video,
+                "freezedetect=n=-60dB:d=3",
+                r"freeze_start: (?P<start>\d+(?:\.\d+)?).*?freeze_duration: (?P<duration>\d+(?:\.\d+)?)",
+            )
+        except ProbeError as exc:
             add(
                 Check(
-                    "final.freeze",
-                    "warning",
-                    "Final video contains a long near-static interval.",
+                    "final.freeze_unverified",
+                    "error",
+                    "Could not verify freeze frames — the final video could not be probed.",
                     path=str(final_video),
-                    details=event,
+                    details={"error": str(exc)},
                 )
             )
+        else:
+            for event in freeze_events:
+                add(
+                    Check(
+                        "final.freeze",
+                        "warning",
+                        "Final video contains a long near-static interval.",
+                        path=str(final_video),
+                        details=event,
+                    )
+                )
 
     return _report(run_dir, checks, segment_checks)
 

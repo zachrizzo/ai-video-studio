@@ -20,6 +20,7 @@ from typing import Any
 from fastapi import WebSocket, WebSocketDisconnect
 
 from src.studio import capabilities, config, transcripts
+from src.studio.agent_prompts import build_preset_context, build_project_context
 from src.studio.runs import _runs_root
 
 logger = logging.getLogger(__name__)
@@ -347,6 +348,22 @@ faint chromatic fringe); (3) `"transition_in"` / `"transition_out"`
 boundary. Chain them: give a scene a `transition_out` and the NEXT scene a matching
 `transition_in` so the hard cut between clips reads as a tracking dissolve. See the
 FILM FINISH cookbook in docs/collage/AUTHORING.md.
+
+SCRIPT VOICE (docs/script-voice.md — the house contract; QA lints the
+mechanical subset as voice.* warnings): narration is spoken copy a host would
+say on mic — contractions, short sentences, a point of view, questions to the
+viewer, varied rhythm. Facts stay verified; REACTIONS carry personality. The
+tells to avoid (each one shipped in a real script): a tidy kicker on every
+story (max 2-3 per video; most stories just end), "X, one message: Y"
+summarizers, colon-reveal openers ("First up:"/"Story three:" — numbering
+lives on-screen, never spoken), labeling rhetoric ("The hook:"),
+explicit-nuance lectures ("note what it's not"), editorial-process language
+("fact-checked"/"cross-checked" — describe the story, never the research;
+attributed hedges like "Bloomberg says" are fine), precision-with-hedge
+numbers spoken aloud (round in the mouth, exact on screen), appositive
+chains, uniform segment lengths, "it's not X — it's Y" more than once, an
+essay-conclusion outro. Read one segment aloud (or synthesize it) before
+writing the rest.
 
 PRODUCTION CONTRACT — act like a producer, not a one-shot prompt bot:
 1. Before generating, write a structured `<run_dir>/script.json` that includes:
@@ -937,155 +954,12 @@ async def handle_ws(websocket: WebSocket) -> None:
                 except Exception:  # noqa: BLE001
                     project = None
                 if project:
-                    from src.studio.runs import get_run
-
-                    run_lines = []
-                    for rid in project["run_ids"][:12]:
-                        try:
-                            manifest = get_run(rid) or {}
-                            title = manifest.get("title", rid)
-                        except Exception:  # noqa: BLE001
-                            title = rid
-                        run_lines.append(f"  - {rid}: {title}")
-                    other_chats = len(project.get("conversations", []))
-                    project_ctx = (
-                        f"\n\n[ACTIVE PROJECT: {project['name']} (id {project_id})]\n"
-                        f"- This chat belongs to the project above; the project has "
-                        f"{other_chats} chat(s) and {len(project['run_ids'])} video run(s).\n"
-                    )
-                    if run_lines:
-                        project_ctx += (
-                            "- Existing video runs in this project:\n" + "\n".join(run_lines) + "\n"
-                            "When the user refers to 'the video', 'the storyboard', or asks for "
-                            "edits without naming a run, prefer this project's runs (the active "
-                            "run first). New videos you create in this chat belong to this "
-                            "project automatically.\n"
-                        )
-                    user_text = user_text + project_ctx
+                    user_text = user_text + build_project_context(project)
 
             # Inject preset context so the agent knows the user's chosen style
             preset = msg.get("preset")
             if preset:
-                style_pack = preset.get("style_pack")
-                default_visual_engine = preset.get("default_visual_engine")
-                collage_lines = ""
-                if style_pack:
-                    collage_lines += f"- Style pack: {style_pack}\n"
-                if default_visual_engine:
-                    collage_lines += f"- Default visual engine: {default_visual_engine}\n"
-                if style_pack:
-                    collage_lines += (
-                        f"Set style_pack in script.json to '{style_pack}'. "
-                        f"For collage segments follow docs/collage/AUTHORING.md and run the "
-                        f"align/assets/collage tools between synthesize and manifest.\n"
-                    )
-                if default_visual_engine == "collage":
-                    collage_lines += (
-                        "Default segments to visual_engine 'collage' unless a segment "
-                        "clearly needs manim math or an AI-motion scene.\n"
-                    )
-                visual_pacing = preset.get("visual_pacing")
-                if visual_pacing:
-                    collage_lines += f"- Visual pacing: {visual_pacing}\n"
-                film_finish = preset.get("film_finish")
-                if film_finish:
-                    collage_lines += f"- Film finish: {film_finish}\n"
-                sfx_style = preset.get("sfx_style")
-                if sfx_style:
-                    collage_lines += (
-                        f"- Sound effects: {sfx_style} Declare `sfx` cues on segments in "
-                        f"script.json and run the sfx tool after align.\n"
-                    )
-                # Voice: default is local Qwen3-TTS, but a preset can pin the
-                # Voicebox voice studio (open-source app at 127.0.0.1:17493).
-                if preset.get("tts_provider") == "voicebox":
-                    voicebox_profile = preset.get("voicebox_profile", "Narrator")
-                    voice_lines = (
-                        f"Use the synthesize tool for voice, never silent audio. "
-                        f"This preset uses the Voicebox voice studio: call mcp__studio__synthesize "
-                        f"with voice_provider='voicebox' and voicebox_profile='{voicebox_profile}'. "
-                        f"If synthesize fails because Voicebox is unreachable, tell the user to launch the "
-                        f"Voicebox app (voicebox.sh) so it is listening at 127.0.0.1:17493 — do NOT silently "
-                        f"switch to another TTS provider. "
-                    )
-                else:
-                    voice_lines = (
-                        f"Use the synthesize tool (Qwen3-TTS local) for voice, never silent audio: "
-                        f"call mcp__studio__synthesize with speaker='{preset.get('voice_speaker', 'serena')}' "
-                        f"and language='{preset.get('voice_language', 'english')}'. "
-                    )
-                if preset.get("qwen_model_size"):
-                    voice_lines += (
-                        f"Pass qwen_model_size='{preset['qwen_model_size']}' to synthesize. "
-                    )
-
-                # Generation-quality overrides: only present when the user has
-                # explicitly customized them (Customize modal), so absence means
-                # "use the tool's own defaults" — never invent values here.
-                gen_params: list[str] = []
-                if preset.get("image_model"):
-                    gen_params.append(f"model='{preset['image_model']}'")
-                if preset.get("image_steps") is not None:
-                    gen_params.append(f"steps={preset['image_steps']}")
-                if preset.get("image_quantize") is not None:
-                    gen_params.append(f"quantize={preset['image_quantize']}")
-                generation_lines = ""
-                if gen_params:
-                    generation_lines += (
-                        f"- Image generation: call imagegen with {', '.join(gen_params)}.\n"
-                    )
-                ltx_params: list[str] = []
-                if preset.get("ltx_steps") is not None:
-                    ltx_params.append(f"steps={preset['ltx_steps']}")
-                if preset.get("ltx_resolution"):
-                    ltx_params.append(f"resolution='{preset['ltx_resolution']}'")
-                if preset.get("ltx_clip_seconds") is not None:
-                    ltx_params.append(f"clip_seconds={preset['ltx_clip_seconds']}")
-                if preset.get("ltx_cfg_scale") is not None:
-                    ltx_params.append(f"cfg_scale={preset['ltx_cfg_scale']}")
-                if preset.get("ltx_stg_scale") is not None:
-                    ltx_params.append(f"stg_scale={preset['ltx_stg_scale']}")
-                if preset.get("ltx_prefer_extend") is not None:
-                    ltx_params.append(f"prefer_extend={preset['ltx_prefer_extend']}")
-                if preset.get("video_fallback_to_kenburns") is not None:
-                    ltx_params.append(f"fallback_to_kenburns={preset['video_fallback_to_kenburns']}")
-                if preset.get("kenburns_zoom") is not None:
-                    ltx_params.append(f"kenburns_zoom={preset['kenburns_zoom']}")
-                if ltx_params:
-                    generation_lines += (
-                        f"- Video motion tuning: call videogen with {', '.join(ltx_params)}.\n"
-                    )
-
-                speed_line = ""
-                preset_speed = preset.get("video_speed")
-                if preset_speed and float(preset_speed) != 1.0:
-                    speed_line = (
-                        f"- Final playback speed: {preset_speed}x — pass "
-                        f"speed={preset_speed} to composite (and to produce_run "
-                        f"if you use it) so the final video is retimed.\n"
-                    )
-                preset_ctx = (
-                    f"\n\n[ACTIVE PRESET: {preset.get('name', '?')}]\n"
-                    f"- Image style: {preset.get('style_prompt', '')}\n"
-                    f"- Narration style: {preset.get('narration_style', '')}\n"
-                    f"- Target length: {preset.get('video_length_minutes', '?')} minutes\n"
-                    f"- Voice: speaker={preset.get('voice_speaker', 'serena')}, language={preset.get('voice_language', 'english')}\n"
-                    f"- Video motion: {preset.get('video_provider', 'ltx')}\n"
-                    f"{speed_line}"
-                    f"{collage_lines}"
-                    f"{generation_lines}"
-                    f"IMPORTANT: Use these settings when generating the video. "
-                    f"Call the videogen tool with video_provider='ltx' so LTX-2.3 animates the storyboard action; use Ken Burns only if explicitly requested or as fallback. "
-                    f"Put the image style and narration style into script.json as style_bible and narration_style. "
-                    f"Prefix ALL segment image_prompt and visual_beats image_prompt values with the style prompt above. "
-                    f"For scene segments longer than ~6 seconds, write 2-4 visual_beats with storyboard fields "
-                    f"(description, shot_type, composition, action, camera_motion) so LTX can bring each still's action to life and the final video changes visuals every 3-6 seconds. "
-                    f"{voice_lines}"
-                    f"Before imagegen, run the storyboard tool and fix its warnings. "
-                    f"After videogen, run the manifest tool before compositing. "
-                    f"After compositing, run the qa tool and fix failures.\n"
-                )
-                user_text = user_text + preset_ctx
+                user_text = user_text + build_preset_context(preset)
 
             # Build options
             options = ClaudeAgentOptions(

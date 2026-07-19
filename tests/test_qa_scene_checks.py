@@ -159,3 +159,88 @@ def test_near_uniform_noisy_scene_is_not_blank(tmp_path: Path) -> None:
     report = qa_run(run_dir)
     ids = {c["id"] for c in report["checks"]}
     assert "scene.blank_frames" not in ids
+
+
+def _corrupt(path: Path) -> None:
+    path.write_bytes(b"this is not a decodable video container")
+
+
+def test_unprobeable_scene_render_is_flagged_not_silently_passed(tmp_path: Path) -> None:
+    """A corrupt/unreadable scene render must NOT silently pass the duration and
+    blank-frame gates — both probes fail, so both must surface as explicit
+    *_unverified errors instead of a value indistinguishable from a clean pass."""
+    run_dir = _make_run(
+        tmp_path,
+        engine="collage",
+        audio_seconds=3.0,
+        estimated_seconds=3.0,
+        video_maker=_corrupt,
+    )
+    report = qa_run(run_dir)
+    ids = {c["id"] for c in report["checks"]}
+    assert "scene.duration_unverified" in ids
+    assert "scene.blank_frames_unverified" in ids
+    # It must NOT be reported as a clean duration/blank result.
+    assert "scene.duration_drift" not in ids
+    assert "scene.blank_frames" not in ids
+    unverified = [c for c in report["checks"] if c["id"].endswith("_unverified")]
+    assert all(c["severity"] == "error" for c in unverified)
+
+
+# ---------------------------------------------------------------------------
+# narration voice: AI-tell detection (docs/script-voice.md)
+# ---------------------------------------------------------------------------
+def test_detect_ai_tells_flags_known_patterns() -> None:
+    from src.qa.run_qa import detect_ai_tells
+
+    segments = [
+        # colon-reveal opener + labeled rhetoric + editorial-process language
+        ("s1", "First up: a big model. The hook: it was built fast. Every claim fact-checked."),
+        # tidy-kicker aphorism + "one message" summarizer
+        ("s2", "Two stories, one message: the world is picking sides."),
+        # explicit-nuance lecture + it's-not-X-it's-Y contrast
+        ("s3", "But note what it's not: it's not a ban — it's a rule. An important nuance: robots."),
+        # uniformity source (same-ish length as others) + zero questions overall
+        ("s4", "Meanwhile, spending is up. Record spending, deep cuts, and an honest admission."),
+    ]
+    tells = detect_ai_tells(segments)
+    joined = " ".join(t["message"] for t in tells).lower()
+    ids = {t["id"] for t in tells}
+    assert any("colon" in m or "reveal" in m for m in joined.split(". ")) or "voice.colon_reveal" in ids
+    assert "voice.one_message" in ids or "one message" in joined
+    assert "voice.labeled_rhetoric" in ids or "the hook" in joined
+    assert "voice.editorial_process" in ids or "fact-checked" in joined
+    assert "voice.explicit_nuance" in ids or "nuance" in joined
+    # zero questions across the whole script is itself a tell
+    assert "voice.no_questions" in ids
+
+
+def test_detect_ai_tells_clean_script_is_quiet() -> None:
+    from src.qa.run_qa import detect_ai_tells
+
+    segments = [
+        ("s1", "Google still hasn't shipped. And honestly? A free model just beat them to it."),
+        ("s2", "So why would TikTok ban AI from its own shop? Trust. Shoppers spot the fakes."),
+        ("s3", "Meta spent big, cut deep, and Zuckerberg says the agents aren't there yet. That's the whole story."),
+    ]
+    tells = detect_ai_tells(segments)
+    assert tells == [], [t["id"] for t in tells]
+
+
+def test_qa_run_surfaces_voice_warnings(tmp_path: Path) -> None:
+    """qa_run should surface voice tells as WARNINGS (never errors)."""
+    def black(video_path: Path) -> None:
+        _ffmpeg(["-f", "lavfi", "-i", "color=c=black:s=320x180:d=1.0", "-r", "30", str(video_path)])
+
+    run_dir = _make_run(tmp_path, engine="collage", audio_seconds=1.0,
+                        estimated_seconds=1.0, video_maker=black)
+    script = json.loads((run_dir / "script.json").read_text())
+    script["segments"][0]["narration_text"] = (
+        "First up: a model. Two stories, one message: buy it. Every claim fact-checked."
+    )
+    (run_dir / "script.json").write_text(json.dumps(script))
+
+    report = qa_run(run_dir)
+    voice = [c for c in report["checks"] if c["id"].startswith("voice.")]
+    assert voice, "expected voice.* checks in report"
+    assert all(c["severity"] == "warning" for c in voice)
