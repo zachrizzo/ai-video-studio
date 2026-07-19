@@ -46,6 +46,15 @@ html, body {
   user-select: none;
   -webkit-user-drag: none;
 }
+/* native video layer: the <video> fills its .collage-layer wrapper exactly
+ * like a layer <img> (width:100%; height keeps the clip's aspect). */
+.collage-video {
+  display: block;
+  width: 100%;
+  height: auto;
+  user-select: none;
+  -webkit-user-drag: none;
+}
 
 /* ---- torn-paper label ---- */
 .collage-label {

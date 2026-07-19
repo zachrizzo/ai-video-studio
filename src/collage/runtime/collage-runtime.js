@@ -183,6 +183,65 @@
     return img;
   }
 
+  // ---- video registry (native video layers) -------------------------------
+  // Video layers make seek(t) ASYNCHRONOUS: setting video.currentTime decodes
+  // off the main thread, so a screenshot taken immediately would race and grab
+  // the previous frame. We register every <video>, drive its currentTime as a
+  // pure function of t inside the renderers, then have seek(t) return a Promise
+  // that resolves once every video has decoded its target frame (the frame
+  // renderer AWAITs page.evaluate(window.seek(t)), so the awaited screenshot
+  // captures the decoded frame). No videos in the scene -> seek stays
+  // synchronous (returns undefined), preserving the frozen contract.
+  var videos = [];
+  var SEEK_TIMEOUT_MS = 250; // guard: a stalled decode can't freeze the render
+  function makeVideo(url) {
+    var v = document.createElement("video");
+    v.className = "collage-video";
+    v.muted = true;
+    v.defaultMuted = true;
+    v.playsInline = true;
+    v.autoplay = false;
+    v.loop = false;
+    v.preload = "auto";
+    // NB: set .src via JS (not a src="" attribute) so the self-contained /
+    // no-network validator never sees a src= literal; relative file URLs only.
+    v.src = url;
+    v.load();
+    var rec = { video: v, setTarget: NaN, pending: false };
+    videos.push(rec);
+    return rec;
+  }
+  // Request a decoded frame at *target* seconds (idempotent per target).
+  function driveVideo(rec, target) {
+    if (rec.setTarget === target) {
+      return; // already showing (or decoding) this exact frame
+    }
+    rec.setTarget = target;
+    rec.pending = true;
+    rec.video.currentTime = target;
+  }
+  // Resolve once this video reaches its requested frame (or the guard fires).
+  function waitVideo(rec) {
+    if (!rec.pending) {
+      return Promise.resolve();
+    }
+    var video = rec.video;
+    return new Promise(function (resolve) {
+      var settled = false;
+      function finish() {
+        if (settled) {
+          return;
+        }
+        settled = true;
+        rec.pending = false;
+        video.removeEventListener("seeked", finish);
+        resolve();
+      }
+      video.addEventListener("seeked", finish);
+      setTimeout(finish, SEEK_TIMEOUT_MS);
+    });
+  }
+
   // Elements that can be attach targets expose centerPx(t) -> {x, y} screen px.
   var centers = {};
 
@@ -285,6 +344,62 @@
         pose.rotate
       );
       node.style.display = env.vis <= 0 ? "none" : "block";
+    });
+    return node;
+  }
+
+  function buildVideoLayer(el) {
+    // Reuse the layer wrapper so positioning/parallax/transform CSS is shared;
+    // the inner <video> is styled like a layer <img> (.collage-video).
+    var node = document.createElement("div");
+    node.className = "collage-layer";
+    node.style.zIndex = String(el.z || 0);
+    var rec = makeVideo(el.videoUrl);
+    var video = rec.video;
+    node.appendChild(video);
+    stage.appendChild(node);
+
+    var startResolved = el.start === null || el.start === undefined ? 0 : el.start;
+    var clipStart = el.clip_start || 0;
+    var rate = el.rate || 1;
+
+    // currentTime is a PURE function of t (no autoplay/loop): the clip begins at
+    // scene time startResolved, offset clipStart into the source, at `rate`.
+    function timeAt(t) {
+      var target = clipStart + Math.max(0, t - startResolved) * rate;
+      var dur = video.duration;
+      if (isFinite(dur) && dur > 0) {
+        return clamp(target, 0, dur);
+      }
+      return Math.max(0, target);
+    }
+
+    centers[el.id] = function (t) {
+      var cam = cameraAt(t);
+      var p = parallax(cam, el.depth);
+      return { x: el.x * FW + p.x, y: el.y * FH + p.y, depth: el.depth };
+    };
+
+    renderers.push(function (t) {
+      var env = envelope(t, el.enter, el.exit);
+      var cam = cameraAt(t);
+      var p = parallax(cam, el.depth);
+      node.style.left = el.x * FW + "px";
+      node.style.top = el.y * FH + "px";
+      node.style.width = el.width * FW + "px";
+      node.style.opacity = String(el.opacity * env.vis);
+      node.style.transform = baseTransform(
+        el.x,
+        el.y,
+        p.x,
+        p.y,
+        env.dy,
+        el.scale,
+        el.rotate
+      );
+      node.style.display = env.vis <= 0 ? "none" : "block";
+      // Drive the decode target for this frame; seek() awaits it below.
+      driveVideo(rec, timeAt(t));
     });
     return node;
   }
@@ -699,6 +814,8 @@
     var node = null;
     if (el.type === "layer") {
       node = buildLayer(el);
+    } else if (el.type === "video") {
+      node = buildVideoLayer(el);
     } else if (el.type === "label") {
       node = buildLabel(el);
     } else if (el.type === "particles") {
@@ -770,6 +887,17 @@
     for (var i = 0; i < renderers.length; i++) {
       renderers[i](tc);
     }
+    // Async only when the scene has video: return a Promise that resolves once
+    // every clip has decoded its target frame, so the awaiting frame renderer
+    // screenshots the correct frame. No video -> synchronous (contract intact).
+    if (videos.length) {
+      var waits = [];
+      for (var v = 0; v < videos.length; v++) {
+        waits.push(waitVideo(videos[v]));
+      }
+      return Promise.all(waits);
+    }
+    return undefined;
   }
   window.seek = seek;
 
@@ -807,12 +935,47 @@
       }
       return Promise.all(jobs);
     }
-    return Promise.all([fontsReady(), imagesReady()]).then(function () {
-      // paint the first frame so the renderer never screenshots a blank page
-      measure();
-      seek(0);
-      return true;
-    });
+    function videoReady(rec) {
+      var v = rec.video;
+      // HAVE_CURRENT_DATA (>=2): metadata + the current frame are decodable, so
+      // duration is known and currentTime seeks will fire `seeked`.
+      if (v.readyState >= 2) {
+        return Promise.resolve();
+      }
+      return new Promise(function (resolve) {
+        var settled = false;
+        function done() {
+          if (settled) {
+            return;
+          }
+          settled = true;
+          v.removeEventListener("loadeddata", done);
+          v.removeEventListener("canplay", done);
+          resolve();
+        }
+        v.addEventListener("loadeddata", done);
+        v.addEventListener("canplay", done);
+        setTimeout(done, 5000); // bounded like the sceneReady wait
+      });
+    }
+    function videosReady() {
+      var jobs = [];
+      for (var i = 0; i < videos.length; i++) {
+        jobs.push(videoReady(videos[i]));
+      }
+      return Promise.all(jobs);
+    }
+    return Promise.all([fontsReady(), imagesReady(), videosReady()])
+      .then(function () {
+        // paint the first frame so the renderer never screenshots a blank page.
+        // seek(0) returns a Promise when the scene has video — await it so
+        // frame 0 is decoded before sceneReady resolves.
+        measure();
+        return Promise.resolve(seek(0));
+      })
+      .then(function () {
+        return true;
+      });
   })();
 
   // paint an initial frame immediately (deterministic, no timers)

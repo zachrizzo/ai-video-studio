@@ -678,3 +678,259 @@ def test_moving_scene_renders_end_to_end(tmp_path: Path, style_pack: str) -> Non
     result = render_html(scene, work_dir, (320, 180), 24, 120)
     assert result.success, result.error_message
     assert result.video_path.exists()
+
+
+# ---------------------------------------------------------------------------
+# native video layer (recorded screen-capture clips as layers)
+# ---------------------------------------------------------------------------
+def _make_test_video(path: Path, *, duration: float = 2.0) -> None:
+    """Render a short test clip with a moving pattern + on-screen timer so
+    every frame differs over time (ffmpeg lavfi testsrc)."""
+    import subprocess
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    subprocess.run(
+        [
+            "ffmpeg", "-y", "-loglevel", "error",
+            "-f", "lavfi",
+            "-i", f"testsrc=duration={duration}:size=320x180:rate=30",
+            "-pix_fmt", "yuv420p",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+
+def _video_spec(
+    run_dir: Path, style_pack: str, *, src: str = "assets/shared/clip.webm", duration: float = 1.0
+) -> dict:
+    spec = {
+        "spec_version": 1,
+        "segment_id": "seg",
+        "duration_seconds": duration,
+        "fps": 24,
+        "style_pack": style_pack,
+        "assets": [{"id": "clip", "src": src}],
+        "elements": [
+            {
+                "id": "screencap",
+                "type": "video",
+                "asset_id": "clip",
+                "x": 0.5, "y": 0.5, "width": 0.8,
+                "clip_start": 0.0,
+                "rate": 1.0,
+            },
+        ],
+    }
+    (run_dir / "scenes").mkdir(parents=True, exist_ok=True)
+    (run_dir / "scenes" / "seg.collage.json").write_text(json.dumps(spec))
+    return spec
+
+
+def test_video_layer_compiles(tmp_path: Path, style_pack: str) -> None:
+    """A spec with a video element + video asset compiles; the built HTML
+    carries the video url, the timing fields, and the runtime buildVideoLayer."""
+    run_dir = tmp_path / "run"
+    # asset only needs to EXIST for the file check; contents are irrelevant here
+    (run_dir / "assets" / "shared").mkdir(parents=True)
+    (run_dir / "assets" / "shared" / "clip.webm").write_bytes(b"not-a-real-webm")
+    _video_spec(run_dir, style_pack)
+    spec = load_collage_spec(run_dir / "scenes" / "seg.collage.json")
+
+    html = build_collage_html(
+        spec=spec, run_dir=run_dir, narration_text="", duration_seconds=1.0, words=None
+    )
+
+    # relative, self-contained video URL (CONTRACTS §2)
+    assert "../../assets/shared/clip.webm" in html
+    assert "http://" not in html and "https://" not in html
+    # video timing contract fields present in the compiled scene JSON
+    assert '"videoUrl":' in html
+    assert '"clip_start":' in html
+    assert '"rate":' in html
+    assert '"start":' in html
+    # runtime carries the video-layer builder + the async seek machinery
+    assert "buildVideoLayer" in html
+    # still passes the collage validator (seek contract, no network, deterministic)
+    scene = SceneSpec(
+        segment_id="seg",
+        visual_engine="collage",
+        code=html,
+        target_duration_seconds=1.0,
+        narration_text="",
+        description="video layer",
+    )
+    validate(scene)  # must not raise
+
+
+def test_video_layer_rejects_unknown_field() -> None:
+    """extra='forbid' — an unknown field on a video element fails loudly."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from src.collage.spec import CollageSpec
+
+    spec_json = {
+        "spec_version": 1,
+        "segment_id": "seg",
+        "duration_seconds": 1.0,
+        "assets": [{"id": "clip", "src": "assets/shared/clip.webm"}],
+        "elements": [
+            {
+                "id": "v", "type": "video", "asset_id": "clip",
+                "x": 0.5, "y": 0.5, "width": 0.8,
+                "loop": True,  # not a real field
+            }
+        ],
+    }
+    with pytest.raises(PydanticValidationError, match="loop"):
+        CollageSpec.model_validate(spec_json)
+
+
+def test_video_element_requires_video_asset(tmp_path: Path) -> None:
+    """A video element must reference an asset whose src is a video file."""
+    from pydantic import ValidationError as PydanticValidationError
+
+    from src.collage.spec import CollageSpec
+
+    spec_json = {
+        "spec_version": 1,
+        "segment_id": "seg",
+        "duration_seconds": 1.0,
+        # image asset (generate) — not a video
+        "assets": [{"id": "pic", "generate": {"prompt": "x", "width": 16, "height": 16}}],
+        "elements": [
+            {"id": "v", "type": "video", "asset_id": "pic",
+             "x": 0.5, "y": 0.5, "width": 0.8}
+        ],
+    }
+    with pytest.raises(PydanticValidationError, match="video"):
+        CollageSpec.model_validate(spec_json)
+
+
+def test_video_defaults(tmp_path: Path) -> None:
+    """Video pose defaults: depth 0.0, scale 1.0, rate 1.0, clip_start 0.0."""
+    from src.collage.spec import CollageSpec, VideoLayerElement
+
+    spec = CollageSpec.model_validate(
+        {
+            "spec_version": 1,
+            "segment_id": "seg",
+            "duration_seconds": 1.0,
+            "assets": [{"id": "clip", "src": "assets/shared/clip.mp4"}],
+            "elements": [
+                {"id": "v", "type": "video", "asset_id": "clip",
+                 "x": 0.5, "y": 0.5, "width": 0.8}
+            ],
+        }
+    )
+    el = spec.elements[0]
+    assert isinstance(el, VideoLayerElement)
+    assert el.depth == 0.0
+    assert el.scale == 1.0
+    assert el.rate == 1.0
+    assert el.clip_start == 0.0
+    assert el.start is None
+
+
+def test_video_layer_renders_and_advances(tmp_path: Path, style_pack: str) -> None:
+    """End-to-end proof of frame-accurate video playback:
+
+    1. A scene with a video layer builds AND renders through the real headless
+       frame renderer (result.success + mp4 with the expected frame count).
+    2. Driving the seek contract to two different times decodes two DIFFERENT
+       source frames — the video advances frame-accurately, it is not frozen on
+       frame 0. Proven both by `video.currentTime` advancing to the expected
+       clamped value AND by the rendered pixels differing.
+    """
+    import asyncio
+    import hashlib
+
+    from playwright.async_api import async_playwright
+
+    from src.animation.frame_renderer import _SCENE_READY_JS, _chromium_launch_kwargs
+    from src.animation.html_renderer import render_html
+    from src.animation.models import SceneSpec as RenderSceneSpec
+
+    run_dir = tmp_path / "run"
+    _make_test_video(run_dir / "assets" / "shared" / "clip.webm", duration=2.0)
+    # 2.0s scene so seek(1.5) is un-clamped (seek clamps t to [0, duration]).
+    _video_spec(run_dir, style_pack, duration=2.0)
+    spec = load_collage_spec(run_dir / "scenes" / "seg.collage.json")
+    html = build_collage_html(
+        spec=spec, run_dir=run_dir, narration_text="", duration_seconds=2.0, words=None
+    )
+
+    work_dir = run_dir / "scenes" / "seg_render"
+    work_dir.mkdir(parents=True, exist_ok=True)
+
+    # (1) end-to-end render
+    scene = RenderSceneSpec(
+        segment_id="seg",
+        visual_engine="collage",
+        code=html,
+        target_duration_seconds=2.0,
+        narration_text="",
+        description="video layer render smoke",
+    )
+    result = render_html(scene, work_dir, (320, 180), 24, 120)
+    assert result.success, result.error_message
+    assert result.video_path.exists()
+    # 2.0s @ 24fps -> exactly 48 frames (render_frames already asserts this,
+    # but be explicit that the mp4 is well-formed).
+    from src.animation.frame_renderer import _probe_frame_count
+
+    assert _probe_frame_count(result.video_path) == 48
+
+    # (2a) frame-accuracy through the REAL render path: the frame renderer drives
+    # `await page.evaluate("window.seek(frame/fps)")` (bare expression). If the
+    # returned Promise were not awaited, every clip frame would freeze on frame 0
+    # and — since the pose is static and the grain is constant in t — all output
+    # frames would be identical. Two frames far apart in the OUTPUT mp4 differing
+    # proves the video advanced frame-accurately.
+    import subprocess
+
+    def _frame_png(video: Path, ts: float) -> bytes:
+        out = tmp_path / f"probe_{ts}.png"
+        subprocess.run(
+            ["ffmpeg", "-y", "-loglevel", "error", "-ss", str(ts),
+             "-i", str(video), "-frames:v", "1", str(out)],
+            check=True, capture_output=True,
+        )
+        return out.read_bytes()
+
+    assert _frame_png(result.video_path, 0.1) != _frame_png(result.video_path, 1.5)
+
+    # (2b) frame-accuracy: seek to two times, read currentTime + a pixel signature
+    html_file = work_dir / "seg.html"
+
+    async def _probe():
+        async with async_playwright() as p:
+            browser = await p.chromium.launch(**_chromium_launch_kwargs())
+            context = await browser.new_context(viewport={"width": 320, "height": 180})
+            page = await context.new_page()
+            await page.goto(f"file://{html_file.absolute()}")
+            await page.evaluate(_SCENE_READY_JS)
+            # seek RETURNS A PROMISE when a scene has video — await it so the
+            # target frame is decoded before we read state / screenshot.
+            ct0 = await page.evaluate(
+                "async () => { await window.seek(0.1);"
+                " return document.querySelector('video').currentTime; }"
+            )
+            shot0 = await page.screenshot(type="png")
+            ct1 = await page.evaluate(
+                "async () => { await window.seek(1.5);"
+                " return document.querySelector('video').currentTime; }"
+            )
+            shot1 = await page.screenshot(type="png")
+            await browser.close()
+            return ct0, ct1, shot0, shot1
+
+    ct0, ct1, shot0, shot1 = asyncio.run(_probe())
+
+    # currentTime is a pure function of t: clip_start(0) + max(0, t-0)*rate(1)
+    assert abs(ct0 - 0.1) < 0.06, ct0
+    assert abs(ct1 - 1.5) < 0.06, ct1
+    assert ct1 > ct0
+    # ...and the decoded pixels actually changed (not stuck on frame 0)
+    assert hashlib.sha256(shot0).digest() != hashlib.sha256(shot1).digest()

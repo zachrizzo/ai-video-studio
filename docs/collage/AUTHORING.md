@@ -117,8 +117,10 @@ Declare images under `assets`. Each asset has an `id` and exactly one of:
   model is a config choice (`PTV_IMAGE_MODEL`), defaulting to `z-image-turbo`
   (best archival/painterly fidelity); `schnell` is a faster, lower-fidelity
   fallback.
-- `src`: a path (relative to the run dir) to an existing PNG you dropped in
-  manually.
+- `src`: a path (relative to the run dir) to an existing file you dropped in
+  manually — a PNG for image layers, or a `.webm`/`.mp4`/`.mov` clip for a
+  `video` element. A `video` element must reference a `src` video asset (not a
+  `generate`d one); the build fails loudly otherwise.
 
 Generate assets with:
 
@@ -183,6 +185,47 @@ Recipes:
   "oscillate": { "axis": "y", "amplitude": 0.006, "period": 3.4, "phase": 0.45 } }
 ```
 
+**video** — a recorded clip (webm/mp4/mov) played as a layer. Use it for screen
+recordings: a captured scroll through a release page, a terminal session, a UI
+demo. Positioning, `depth` parallax, `scale`/`rotate`/`opacity`/`z` and
+`enter`/`exit` behave exactly like a `layer`; `width` is normalized to the frame
+width and the height keeps the clip's aspect. The clip does **not** autoplay or
+loop — the runtime drives it deterministically as a pure function of scene time,
+so it renders frame-accurately under the seek contract.
+
+Declare the clip as an `assets` entry with a `src` ending in `.webm`/`.mp4`/
+`.mov` (video assets use `src` only — `generate` is for images). Then:
+
+```json
+{ "id": "screencap", "type": "video", "asset_id": "release_page",
+  "x": 0.5, "y": 0.5, "width": 0.8, "depth": 0.0, "z": 2 }
+```
+
+Video timing (all closed-form in `t`):
+
+- `start` — a TimeRef for the scene time the clip begins playing (omit = from
+  `t=0`). Before `start` the clip holds on its first shown frame.
+- `clip_start` — seconds into the **source** file to begin at (default `0`).
+- `rate` — playback rate (default `1.0`); `0.5` is half-speed, `2.0` double.
+
+The source time shown is `clip_start + max(0, t - start) * rate`, clamped to the
+clip's duration. Because the renderer is frame-stepped (not real-time), a scene
+that contains any video makes `window.seek(t)` **return a Promise** that resolves
+once every clip has decoded its target frame; scenes with no video keep the
+synchronous contract unchanged.
+
+```json
+// A screen recording that scrolls a release page, entering on the word
+// "shipped", starting 4s into the capture at 1.5x so the scroll reads quickly:
+{ "id": "release_demo", "type": "video", "asset_id": "release_scroll",
+  "x": 0.5, "y": 0.52, "width": 0.62, "depth": 0.0, "z": 3,
+  "enter": { "at_word": "shipped", "offset": -0.2 },
+  "start": { "at_word": "shipped" }, "clip_start": 4.0, "rate": 1.5 }
+```
+
+Pair the clip with a torn-paper `label` or a `mono` `typewriter` caption pinned
+nearby to annotate what's on screen, exactly as you would a still `layer`.
+
 **label** — a torn-paper word chip, optionally pinned to another element.
 ```json
 { "id": "label_field", "type": "label", "text": "the field",
@@ -241,6 +284,7 @@ Panels enter staggered 0.3s apart.
 | `missing asset files` | run the `assets` command, or fix the `src` path |
 | `alignment is missing/stale for <id>` | re-run the `align` command |
 | `layer 'x': unknown asset_id` | declare the asset under `assets` |
+| `video 'x': asset ... must be a video file` | point the `video` element at a `src` asset ending in `.webm`/`.mp4`/`.mov` |
 
 ## Golden examples
 

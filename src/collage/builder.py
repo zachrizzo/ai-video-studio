@@ -36,6 +36,7 @@ from src.collage.spec import (
     ParticlesElement,
     SplitElement,
     TypewriterElement,
+    VideoLayerElement,
     default_asset_seed,
 )
 from src.collage.timing import resolve_time
@@ -289,6 +290,26 @@ def build_collage_html(
                     "z": el.z,
                     "move": move,
                     "oscillate": oscillate,
+                }
+            )
+        elif isinstance(el, VideoLayerElement):
+            # A recorded clip played as a layer. videoUrl resolves like an image
+            # assetUrl (relative ../../); start is the scene time the clip begins
+            # (null = t=0); clip_start/rate drive currentTime as a function of t.
+            base.update(
+                {
+                    "videoUrl": asset_urls[el.asset_id],
+                    "x": el.x,
+                    "y": el.y,
+                    "width": el.width,
+                    "depth": el.depth,
+                    "scale": el.scale,
+                    "rotate": el.rotate,
+                    "opacity": el.opacity,
+                    "z": el.z,
+                    "start": opt_rt(el.start),
+                    "clip_start": el.clip_start,
+                    "rate": el.rate,
                 }
             )
         elif isinstance(el, LabelElement):

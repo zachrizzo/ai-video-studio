@@ -34,6 +34,7 @@ from .spec import (
     MaskElement,
     NodeGraphElement,
     TimeRef,
+    VideoLayerElement,
     load_collage_spec,
 )
 from .work import collage_segment_ids, print_skipped
@@ -64,6 +65,8 @@ def _all_timerefs(spec: CollageSpec) -> list[TimeRef]:
             refs.append(el.reveal)
         if isinstance(el, NodeGraphElement):
             refs.append(el.reveal)
+        if isinstance(el, VideoLayerElement) and el.start is not None:
+            refs.append(el.start)
     return refs
 
 

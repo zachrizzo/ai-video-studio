@@ -28,6 +28,15 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 _ID_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
+# A video asset is just a CollageAsset whose src is one of these containers; the
+# builder/runtime play it as a native <video> layer instead of decoding a still.
+_VIDEO_EXTS = (".webm", ".mp4", ".mov", ".m4v")
+
+
+def is_video_src(src: str | None) -> bool:
+    """True when *src* names a video container (case-insensitive extension)."""
+    return bool(src) and src.lower().endswith(_VIDEO_EXTS)
+
 
 class _Frozen(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -156,6 +165,37 @@ class LayerElement(_Element):
     oscillate: Oscillation | None = None
 
 
+class VideoLayerElement(_Element):
+    """A recorded clip (webm/mp4/mov) played as a layer in the parallax stack.
+
+    Positioning/parallax/enter-exit reuse the same machinery as ``layer``. The
+    clip does NOT autoplay/loop — the runtime drives ``video.currentTime`` as a
+    pure function of scene time t so the frame-stepped renderer stays
+    deterministic:
+
+        currentTime = clip_start + max(0, t - startResolved) * rate
+
+    clamped to ``[0, video.duration]``. ``start`` is the scene time the clip
+    begins playing (None = from t=0); ``clip_start`` is the offset (seconds)
+    into the source at which playback begins; ``rate`` is the playback rate.
+    """
+
+    type: Literal["video"]
+    asset_id: str
+    x: float = Field(ge=0, le=1)
+    y: float = Field(ge=0, le=1)
+    width: float = Field(gt=0, le=2)  # normalized to frame width; height keeps aspect
+    depth: float = Field(default=0.0, ge=0, le=1)
+    scale: float = Field(default=1.0, gt=0)
+    rotate: float = 0.0  # degrees
+    opacity: float = Field(default=1.0, ge=0, le=1)
+    z: int = 0  # explicit stacking; ties break by list order
+    # Video timing (all closed-form in t — seek-contract safe).
+    start: TimeRef | None = None  # scene time the clip begins; None = t=0
+    clip_start: float = Field(default=0.0, ge=0)  # seconds into the source
+    rate: float = Field(default=1.0, gt=0)  # playback rate
+
+
 class LabelElement(_Element):
     """A torn-paper word label, optionally pinned to another element."""
 
@@ -253,6 +293,7 @@ class NodeGraphElement(_Element):
 CollageElement = Annotated[
     Union[
         LayerElement,
+        VideoLayerElement,
         LabelElement,
         MaskElement,
         ParticlesElement,
@@ -322,9 +363,19 @@ class CollageSpec(_Frozen):
             raise ValueError("duplicate element ids")
         assets = set(asset_ids)
         elements = set(element_ids)
+        asset_by_id = {a.id: a for a in self.assets}
         for el in self.elements:
             if isinstance(el, LayerElement) and el.asset_id not in assets:
                 raise ValueError(f"layer {el.id!r}: unknown asset_id {el.asset_id!r}")
+            if isinstance(el, VideoLayerElement):
+                asset = asset_by_id.get(el.asset_id)
+                if asset is None:
+                    raise ValueError(f"video {el.id!r}: unknown asset_id {el.asset_id!r}")
+                if not is_video_src(asset.src):
+                    raise ValueError(
+                        f"video {el.id!r}: asset {el.asset_id!r} must be a video file "
+                        f"(src ending in {', '.join(_VIDEO_EXTS)}); got {asset.src!r}"
+                    )
             if isinstance(el, LabelElement) and el.attach is not None and el.attach not in elements:
                 raise ValueError(f"label {el.id!r}: attach target {el.attach!r} is not an element id")
             if isinstance(el, MaskElement):
